@@ -3,7 +3,8 @@ package plugin
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -40,7 +41,7 @@ func (a *Adapter) Registration() pluginapi.Plugin {
 	return pluginapi.Plugin{SchemaVersion: 2, Metadata: pluginapi.Metadata{Name: "cliproxy-cursor-acp", Version: Version, Author: "Malte Sussdorff", GitHubRepository: "https://github.com/sussdorff/cliproxy-cursor-acp"}, Capabilities: pluginapi.Capabilities{
 		AuthProvider: a, ModelProvider: a, Executor: a, UsagePlugin: a,
 		ExecutorModelScope:   pluginapi.ExecutorModelScopeOAuth,
-		ExecutorInputFormats: []string{"openai-chat", "openai-response"}, ExecutorOutputFormats: []string{"openai-chat", "openai-response"},
+		ExecutorInputFormats: []string{"openai"}, ExecutorOutputFormats: []string{"openai"},
 	}}
 }
 
@@ -59,27 +60,27 @@ func (a *Adapter) ParseAuth(_ context.Context, request pluginapi.AuthParseReques
 
 // StartLogin intentionally directs operators to the official CLI. The plugin
 // does not read, write, or transport credential material.
-func (a *Adapter) StartLogin(_ context.Context, request pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
-	authID, _ := request.Metadata["auth_id"].(string)
-	if _, ok := a.accounts[authID]; !ok {
-		return pluginapi.AuthLoginStartResponse{}, cursorFailure("unknown_auth", "select a configured Cursor account")
-	}
-	return pluginapi.AuthLoginStartResponse{Provider: cursor.ProviderID, State: authID, ExpiresAt: time.Now().Add(15 * time.Minute), Metadata: map[string]any{"instruction": "Run `CURSOR_CONFIG_DIR=<private-profile> agent login` for the selected configured account, then poll this state."}}, nil
+func (a *Adapter) StartLogin(_ context.Context, _ pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+	return pluginapi.AuthLoginStartResponse{Provider: cursor.ProviderID, State: "preprovisioned-profiles", ExpiresAt: time.Now().Add(15 * time.Minute), Metadata: map[string]any{"instruction": "Authenticate each configured private profile with the official Cursor Agent CLI, then poll for all available configured accounts."}}, nil
 }
 func (a *Adapter) PollLogin(ctx context.Context, request pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
-	account, ok := a.accounts[request.State]
-	if !ok {
-		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "unknown configured Cursor account"}, nil
+	if request.State != "preprovisioned-profiles" {
+		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "unknown Cursor login state"}, nil
 	}
 	if a.prober == nil {
 		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "official Cursor CLI status probing is unavailable"}, nil
 	}
-	available, err := a.prober.Probe(ctx, account)
-	if err != nil || !available {
-		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "Cursor CLI profile is not authenticated or unavailable"}, nil
+	auths := make([]pluginapi.AuthData, 0, len(a.accounts))
+	for _, account := range a.accounts {
+		available, _ := a.prober.Probe(ctx, account)
+		if available {
+			auths = append(auths, a.authData(ctx, account))
+		}
 	}
-	auth := a.authData(ctx, account)
-	return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusSuccess, Message: "official Cursor CLI profile is available", Auth: auth, Auths: []pluginapi.AuthData{auth}}, nil
+	if len(auths) == 0 {
+		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "no configured Cursor CLI profile is available"}, nil
+	}
+	return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusSuccess, Message: "configured Cursor CLI profiles are available", Auth: auths[0], Auths: auths}, nil
 }
 func (a *Adapter) RefreshAuth(ctx context.Context, request pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
 	account, ok := a.accounts[request.AuthID]
@@ -173,10 +174,13 @@ func decodeRequest(executor pluginapi.ExecutorRequest) (prompt, conversationID s
 	} else if candidate, ok := executor.Metadata["request_id"].(string); ok && strings.TrimSpace(candidate) != "" {
 		conversationID = candidate
 	} else {
-		sum := sha256.Sum256(append(append([]byte(executor.AuthID+"\x00"), payload...), 0))
-		conversationID = fmt.Sprintf("stateless-%x", sum[:12])
+		identifier := make([]byte, 16)
+		if _, err := rand.Read(identifier); err != nil {
+			return "", "", cursor.ValidationFailure("conversation_id_unavailable", "could not create request identity")
+		}
+		conversationID = "stateless-" + hex.EncodeToString(identifier)
 	}
 	return prompt, conversationID, nil
 }
 
-func cursorFailure(code, message string) error { return fmt.Errorf("%s: %s", code, message) }
+func cursorFailure(code, message string) error { return cursor.ValidationFailure(code, message) }

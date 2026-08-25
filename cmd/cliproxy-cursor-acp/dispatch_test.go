@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func TestABIBounds(t *testing.T) {
@@ -40,7 +41,7 @@ func TestConfigureRegistersRequiredCLIProxyCapabilities(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	config := []byte("executable: agent\nmax_concurrent: 1\nmax_prompt_bytes: 100\nmax_output_bytes: 100\ntimeout: 1s\nworkspace_root: " + workspace + "\naccounts:\n  - auth_id: cursor-a\n    label: A\n    profile_dir: " + profile + "\n    model: cursor/auto\n")
+	config := []byte("executable: " + os.Args[0] + "\nmax_concurrent: 1\nmax_prompt_bytes: 100\nmax_output_bytes: 100\ntimeout: 1s\nworkspace_root: " + workspace + "\naccounts:\n  - auth_id: cursor-a\n    label: A\n    profile_dir: " + profile + "\n    model: cursor/auto\n")
 	raw, err := json.Marshal(lifecycleRequest{ConfigYAML: config})
 	if err != nil {
 		t.Fatal(err)
@@ -51,5 +52,20 @@ func TestConfigureRegistersRequiredCLIProxyCapabilities(t *testing.T) {
 	}
 	if registration.SchemaVersion != pluginabi.SchemaVersion || !registration.Capabilities.AuthProvider || !registration.Capabilities.ModelProvider || !registration.Capabilities.Executor || !registration.Capabilities.UsagePlugin {
 		t.Fatalf("registration = %#v", registration)
+	}
+	if len(registration.Capabilities.ExecutorInputFormats) != 1 || registration.Capabilities.ExecutorInputFormats[0] != "openai" {
+		t.Fatalf("formats = %#v", registration.Capabilities.ExecutorInputFormats)
+	}
+	request, _ := json.Marshal(pluginapi.ExecutorRequest{AuthID: "cursor-a", Format: "openai", Payload: []byte(`{"messages":[]}`)})
+	raw, failed := dispatch(pluginabi.MethodExecutorExecute, request)
+	if !failed {
+		t.Fatal("malformed OpenAI request succeeded")
+	}
+	var envelope pluginabi.Envelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Error == nil || envelope.Error.HTTPStatus != 400 {
+		t.Fatalf("validation envelope = %s", raw)
 	}
 }

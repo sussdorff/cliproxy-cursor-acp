@@ -44,7 +44,7 @@ func testConfig(t *testing.T, accounts []cursor.Account) cursor.Config {
 			t.Fatal(err)
 		}
 	}
-	config, err := cursor.NormalizeConfig(cursor.Config{Executable: "agent", Accounts: accounts, MaxConcurrent: 1, MaxPromptBytes: 100, MaxOutputBytes: 100, WorkspaceRoot: workspace, Timeout: time.Second})
+	config, err := cursor.NormalizeConfig(cursor.Config{Executable: os.Args[0], Accounts: accounts, MaxConcurrent: 1, MaxPromptBytes: 100, MaxOutputBytes: 100, WorkspaceRoot: workspace, Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,11 +105,48 @@ func TestExecutorAcceptsCanonicalOpenAIRequestWithoutPluginFields(t *testing.T) 
 	}
 	adapter, _ := New(service, accounts, config.WorkspaceRoot, availableProbe{})
 	payload, _ := json.Marshal(map[string]any{"model": "cursor/auto", "messages": []map[string]string{{"role": "user", "content": "hello"}}})
-	response, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: "cursor-a", Model: "cursor/auto", Payload: payload})
+	response, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: "cursor-a", Model: "cursor/auto", Format: "openai", Payload: payload})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(response.Payload), "\"content\":\"ok\"") {
 		t.Fatalf("response = %s", response.Payload)
+	}
+}
+
+func TestMetadataFreeRequestsHaveDistinctStatelessSessions(t *testing.T) {
+	payload, _ := json.Marshal(map[string]any{"messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	_, first, err := decodeRequest(pluginapi.ExecutorRequest{AuthID: "cursor-a", Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, second, err := decodeRequest(pluginapi.ExecutorRequest{AuthID: "cursor-a", Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("metadata-free requests reused session identity %q", first)
+	}
+}
+
+func TestPreprovisionedLoginPollReturnsAllAvailableAccounts(t *testing.T) {
+	accounts := []cursor.Account{{AuthID: "cursor-a"}, {AuthID: "cursor-b"}}
+	config := testConfig(t, accounts)
+	accounts = config.Accounts
+	service, err := cursor.NewService(config, testFactory{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, _ := New(service, accounts, config.WorkspaceRoot, availableProbe{})
+	start, err := adapter.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	poll, err := adapter.PollLogin(context.Background(), pluginapi.AuthLoginPollRequest{State: start.State})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if poll.Status != pluginapi.AuthLoginStatusSuccess || len(poll.Auths) != 2 {
+		t.Fatalf("host login flow = %#v", poll)
 	}
 }

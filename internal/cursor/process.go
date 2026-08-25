@@ -36,13 +36,72 @@ type ProfileProber interface {
 func (f CommandFactory) Probe(ctx context.Context, account Account) (bool, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	command := exec.CommandContext(probeCtx, f.Executable, "models")
+	command := exec.Command(f.Executable, "models")
 	command.Env = isolatedEnv(f.BaseEnv, account.ProfileDir)
-	output, err := command.Output()
-	if err != nil || len(strings.TrimSpace(string(output))) == 0 {
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
 		return false, err
 	}
+	stderr, err := command.StderrPipe()
+	if err != nil {
+		return false, err
+	}
+	if err := command.Start(); err != nil {
+		return false, err
+	}
+	var out, diagnostics boundedBuffer
+	var read sync.WaitGroup
+	read.Add(2)
+	go func() { defer read.Done(); _, _ = io.Copy(&out, stdout) }()
+	go func() { defer read.Done(); _, _ = io.Copy(&diagnostics, stderr) }()
+	wait := make(chan error, 1)
+	go func() { wait <- command.Wait() }()
+	select {
+	case err = <-wait:
+	case <-probeCtx.Done():
+		terminateProcessGroup(command)
+		select {
+		case err = <-wait:
+		case <-time.After(time.Second):
+			if command.Process != nil {
+				_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+			}
+			err = <-wait
+		}
+	}
+	read.Wait()
+	if err != nil || out.overflow || diagnostics.overflow || len(strings.TrimSpace(out.String())) == 0 {
+		return false, fmt.Errorf("official Cursor CLI profile probe failed")
+	}
 	return true, nil
+}
+
+type boundedBuffer struct {
+	strings.Builder
+	overflow bool
+}
+
+func (b *boundedBuffer) Write(value []byte) (int, error) {
+	const capBytes = 64 << 10
+	remaining := capBytes - b.Len()
+	if remaining <= 0 {
+		b.overflow = true
+		return len(value), nil
+	}
+	if len(value) > remaining {
+		_, _ = b.Builder.Write(value[:remaining])
+		b.overflow = true
+		return len(value), nil
+	}
+	return b.Builder.Write(value)
+}
+
+func terminateProcessGroup(command *exec.Cmd) {
+	if command.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
 }
 
 func (f CommandFactory) Start(ctx context.Context, account Account) (ACPClient, error) {
@@ -173,9 +232,7 @@ func (p *acpProcess) Close() error {
 	var closeErr error
 	p.closeOnce.Do(func() {
 		_ = p.stdin.Close()
-		if p.command.Process != nil {
-			_ = syscall.Kill(-p.command.Process.Pid, syscall.SIGTERM)
-		}
+		terminateProcessGroup(p.command)
 		wait := make(chan error, 1)
 		go func() { wait <- p.command.Wait() }()
 		select {

@@ -48,6 +48,12 @@ func NormalizeConfig(c Config) (Config, error) {
 	if strings.TrimSpace(c.Executable) == "" {
 		return Config{}, fmt.Errorf("Cursor Agent executable is required")
 	}
+	if !filepath.IsAbs(c.Executable) {
+		return Config{}, fmt.Errorf("Cursor Agent executable must be an absolute trusted path")
+	}
+	if info, err := os.Stat(c.Executable); err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+		return Config{}, fmt.Errorf("Cursor Agent executable is not executable")
+	}
 	if len(c.Accounts) == 0 {
 		return Config{}, fmt.Errorf("at least one Cursor account is required")
 	}

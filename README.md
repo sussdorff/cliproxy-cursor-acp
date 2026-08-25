@@ -48,12 +48,15 @@ CURSOR_CONFIG_DIR=/srv/cursor-profiles/cursor-b agent login
 
 Then use [config/cliproxy-cursor-acp.yaml](config/cliproxy-cursor-acp.yaml).
 `auth_id` is the bridge to CLIProxyAPI's scheduler and must remain stable. Do
-not place tokens, browser cookies, or profile file contents in the YAML.
+not place tokens, browser cookies, or profile file contents in the YAML. The
+`executable` must be a trusted absolute path.
 
 The profile and workspace directories must already exist, be owned by the
 service user, and have mode `0700` (or stricter). The pre-provisioned flow
 creates one host auth record per configured `auth_id`; it reports an account as
 available only when `agent models` succeeds under that account's private profile.
+CLIProxyAPI's login start has no account-selector metadata: start/poll therefore
+returns every configured profile that passes the official CLI probe.
 
 For operational and security detail, see [architecture](docs/architecture.md)
 and [security](docs/security.md).

@@ -41,8 +41,9 @@ only. ACP context usage is not a Cursor subscription quota.
 The native plugin entrypoint speaks CLIProxyAPI's public ABI. It registers auth,
 model, executor, and usage capabilities. The executor accepts a canonical
 OpenAI chat payload. A host `conversation_id` or `request_id` metadata key
-supplies affinity when available; otherwise it derives a deterministic
-stateless turn key. It does not require client-added `conversation_id` or
+supplies affinity when available; otherwise it creates a cryptographically
+random stateless turn key so identical requests from separate callers cannot
+reuse ACP state. It does not require client-added `conversation_id` or
 `working_directory` fields and uses only the configured workspace root. The
 host-selected `AuthID` is mandatory.
 

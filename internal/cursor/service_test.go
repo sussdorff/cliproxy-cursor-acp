@@ -74,7 +74,7 @@ func testService(t *testing.T) (*Service, *fakeFactory) {
 		}
 	}
 	factory := &fakeFactory{}
-	service, err := NewService(Config{Executable: "agent", MaxConcurrent: 2, MaxPromptBytes: 1024, Accounts: []Account{
+	service, err := NewService(Config{Executable: os.Args[0], MaxConcurrent: 2, MaxPromptBytes: 1024, Accounts: []Account{
 		{AuthID: "cursor-a", Label: "A", ProfileDir: profiles + "/a", Model: "cursor/auto"},
 		{AuthID: "cursor-b", Label: "B", ProfileDir: profiles + "/b", Model: "cursor/auto"},
 	}, MaxOutputBytes: 1024, WorkspaceRoot: workspace, Timeout: time.Second}, factory)

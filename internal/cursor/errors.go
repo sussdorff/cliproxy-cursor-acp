@@ -1,6 +1,9 @@
 package cursor
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // FailureKind lets the host distinguish a temporary account failure from an
 // invalid request or configuration that should not trigger account failover.
@@ -34,3 +37,7 @@ func retryable(code string, err error) error {
 func fatal(code string, err error) error {
 	return &Failure{Kind: FailureFatal, Code: code, Err: err}
 }
+
+// ValidationFailure denotes a client/configuration error that must be rendered
+// by the native ABI as a stable HTTP 400 rather than an upstream failure.
+func ValidationFailure(code, message string) error { return fatal(code, errors.New(message)) }

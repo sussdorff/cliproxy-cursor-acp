@@ -19,7 +19,7 @@ func TestNormalizeConfigRejectsInsecureAndAliasedProfiles(t *testing.T) {
 	if err := os.Chmod(profile, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	config := Config{Executable: "agent", WorkspaceRoot: workspace, MaxConcurrent: 1, MaxPromptBytes: 10, MaxOutputBytes: 10, Timeout: time.Second, Accounts: []Account{{AuthID: "a", ProfileDir: profile}, {AuthID: "b", ProfileDir: profile}}}
+	config := Config{Executable: os.Args[0], WorkspaceRoot: workspace, MaxConcurrent: 1, MaxPromptBytes: 10, MaxOutputBytes: 10, Timeout: time.Second, Accounts: []Account{{AuthID: "a", ProfileDir: profile}, {AuthID: "b", ProfileDir: profile}}}
 	if _, err := NormalizeConfig(config); err == nil {
 		t.Fatal("insecure profile accepted")
 	}

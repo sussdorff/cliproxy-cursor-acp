@@ -207,7 +207,7 @@ func configure(raw []byte) (registration, error) {
 	state.service = service
 	state.Unlock()
 	registered := adapter.Registration()
-	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: registered.Metadata, Capabilities: capabilities{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"openai-chat", "openai-response"}, ExecutorOutputFormats: []string{"openai-chat", "openai-response"}, UsagePlugin: true}}, nil
+	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: registered.Metadata, Capabilities: capabilities{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"openai"}, ExecutorOutputFormats: []string{"openai"}, UsagePlugin: true}}, nil
 }
 func shutdown() {
 	state.Lock()
