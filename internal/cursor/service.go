@@ -207,13 +207,22 @@ func (s *Service) ensureAccountClient(ctx context.Context, runtime *accountRunti
 }
 
 func (s *Service) releaseStateless(authID, conversationID string, client ACPClient, sessionID string) {
-	_ = client.CloseSession(context.Background(), sessionID)
+	cleanupLimit := s.timeout
+	if cleanupLimit > time.Second {
+		cleanupLimit = time.Second
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupLimit)
+	err := client.CloseSession(cleanupCtx, sessionID)
+	cancel()
 	s.mu.Lock()
 	if runtime := s.accounts[authID]; runtime != nil && runtime.client == client {
 		delete(runtime.sessions, conversationID)
 	}
 	delete(s.conversationAuth, conversationID)
 	s.mu.Unlock()
+	if err != nil {
+		s.invalidate(authID, client)
+	}
 }
 
 func (s *Service) invalidate(authID string, client ACPClient) {

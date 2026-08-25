@@ -123,6 +123,14 @@ func TestProbeSupervisionBoundsOutputAndTimeout(t *testing.T) {
 	}
 }
 
+func TestProbeSupervisionAcceptsFastOutput(t *testing.T) {
+	factory := CommandFactory{Executable: os.Args[0], ProbeArguments: []string{"-test.run=TestProbeHelperProcess", "--"}, ProbeEnvironment: []string{"GO_WANT_FAKE_PROBE=1"}}
+	available, err := factory.Probe(context.Background(), Account{ProfileDir: "/private/cursor-a"})
+	if err != nil || !available {
+		t.Fatalf("fast probe = %v, %v", available, err)
+	}
+}
+
 type testACPAgent struct{ connection *acp.AgentSideConnection }
 
 func (a *testACPAgent) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {

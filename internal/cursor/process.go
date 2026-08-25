@@ -61,22 +61,22 @@ func (f CommandFactory) Probe(ctx context.Context, account Account) (bool, error
 	read.Add(2)
 	go func() { defer read.Done(); _, _ = io.Copy(&out, stdout) }()
 	go func() { defer read.Done(); _, _ = io.Copy(&diagnostics, stderr) }()
-	wait := make(chan error, 1)
-	go func() { wait <- command.Wait() }()
+	readDone := make(chan struct{})
+	go func() { read.Wait(); close(readDone) }()
 	select {
-	case err = <-wait:
+	case <-readDone:
 	case <-probeCtx.Done():
 		terminateProcessGroup(command)
 		select {
-		case err = <-wait:
+		case <-readDone:
 		case <-time.After(time.Second):
 			if command.Process != nil {
 				_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 			}
-			err = <-wait
+			<-readDone
 		}
 	}
-	read.Wait()
+	err = command.Wait()
 	if err != nil || out.overflow || diagnostics.overflow || len(strings.TrimSpace(out.String())) == 0 {
 		return false, fmt.Errorf("official Cursor CLI profile probe failed")
 	}

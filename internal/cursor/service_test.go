@@ -27,12 +27,13 @@ func (f *fakeFactory) Start(_ context.Context, account Account) (ACPClient, erro
 }
 
 type fakeClient struct {
-	mu              sync.Mutex
-	authID, profile string
-	sessions        map[string]bool
-	closed          bool
-	fail            bool
-	closedSessions  int
+	mu                sync.Mutex
+	authID, profile   string
+	sessions          map[string]bool
+	closed            bool
+	fail              bool
+	closedSessions    int
+	closeSessionBlock <-chan struct{}
 }
 
 func (c *fakeClient) NewSession(_ context.Context, cwd string) (string, error) {
@@ -60,11 +61,20 @@ func (c *fakeClient) Prompt(ctx context.Context, sessionID, prompt string) (Resu
 	return Result{Text: c.authID + ":" + prompt, InputTokens: 3, OutputTokens: 5}, nil
 }
 func (c *fakeClient) Close() error { c.mu.Lock(); c.closed = true; c.mu.Unlock(); return nil }
-func (c *fakeClient) CloseSession(context.Context, string) error {
+func (c *fakeClient) CloseSession(ctx context.Context, _ string) error {
 	c.mu.Lock()
+	block := c.closeSessionBlock
 	c.closedSessions++
 	c.mu.Unlock()
-	return nil
+	if block == nil {
+		return nil
+	}
+	select {
+	case <-block:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func testService(t *testing.T) (*Service, *fakeFactory) {
@@ -255,5 +265,31 @@ func TestBoundConversationSurvivesLaterAccountFailure(t *testing.T) {
 	var failure *Failure
 	if !errors.As(err, &failure) || failure.Code != "conversation_account_mismatch" {
 		t.Fatalf("binding was rolled back: %#v", err)
+	}
+}
+
+func TestStatelessCleanupTimeoutInvalidatesOnlyItsAccountClient(t *testing.T) {
+	service, factory := testService(t)
+	service.timeout = 40 * time.Millisecond
+	_, err := service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "warm", Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := factory.clients["cursor-a"]
+	first.closeSessionBlock = make(chan struct{})
+	started := time.Now()
+	_, err = service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "stateless-timeout", Prompt: "hello", Stateless: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(started) > 300*time.Millisecond {
+		t.Fatal("stateless cleanup exceeded bound")
+	}
+	_, err = service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "next", Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if factory.clients["cursor-a"] == first {
+		t.Fatal("cleanup failure did not replace account client")
 	}
 }
