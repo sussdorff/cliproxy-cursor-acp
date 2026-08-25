@@ -32,6 +32,7 @@ type fakeClient struct {
 	sessions        map[string]bool
 	closed          bool
 	fail            bool
+	closedSessions  int
 }
 
 func (c *fakeClient) NewSession(_ context.Context, cwd string) (string, error) {
@@ -58,8 +59,13 @@ func (c *fakeClient) Prompt(ctx context.Context, sessionID, prompt string) (Resu
 	}
 	return Result{Text: c.authID + ":" + prompt, InputTokens: 3, OutputTokens: 5}, nil
 }
-func (c *fakeClient) Close() error                               { c.mu.Lock(); c.closed = true; c.mu.Unlock(); return nil }
-func (c *fakeClient) CloseSession(context.Context, string) error { return nil }
+func (c *fakeClient) Close() error { c.mu.Lock(); c.closed = true; c.mu.Unlock(); return nil }
+func (c *fakeClient) CloseSession(context.Context, string) error {
+	c.mu.Lock()
+	c.closedSessions++
+	c.mu.Unlock()
+	return nil
+}
 
 func testService(t *testing.T) (*Service, *fakeFactory) {
 	t.Helper()
@@ -213,4 +219,41 @@ func TestSameAccountTurnQueueSurvivesConcurrentFailure(t *testing.T) {
 	}
 	factory.clients["cursor-a"].fail = true
 	_, _ = service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "failure", Prompt: "hello"})
+}
+
+func TestStatelessTurnClosesSessionAndDoesNotRetainAffinity(t *testing.T) {
+	service, factory := testService(t)
+	_, err := service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "stateless", Prompt: "hello", Stateless: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := factory.clients["cursor-a"]
+	client.mu.Lock()
+	closed := client.closedSessions
+	client.mu.Unlock()
+	if closed != 1 {
+		t.Fatalf("closed sessions = %d", closed)
+	}
+	service.mu.Lock()
+	_, hasSession := service.accounts["cursor-a"].sessions["stateless"]
+	_, bound := service.conversationAuth["stateless"]
+	service.mu.Unlock()
+	if hasSession || bound {
+		t.Fatal("stateless turn retained session affinity")
+	}
+}
+
+func TestBoundConversationSurvivesLaterAccountFailure(t *testing.T) {
+	service, factory := testService(t)
+	_, err := service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "bound", Prompt: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory.clients["cursor-a"].fail = true
+	_, _ = service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "bound", Prompt: "again"})
+	_, err = service.Execute(context.Background(), Request{AuthID: "cursor-b", ConversationID: "bound", Prompt: "retry"})
+	var failure *Failure
+	if !errors.As(err, &failure) || failure.Code != "conversation_account_mismatch" {
+		t.Fatalf("binding was rolled back: %#v", err)
+	}
 }

@@ -84,6 +84,14 @@ func TestCommandFactoryBoundsACPOutput(t *testing.T) {
 	}
 }
 
+func TestProbeBufferRejectsLargeOutput(t *testing.T) {
+	buffer := &boundedBuffer{}
+	_, _ = buffer.Write(make([]byte, (64<<10)+1))
+	if !buffer.overflow {
+		t.Fatal("large probe output was not bounded")
+	}
+}
+
 type testACPAgent struct{ connection *acp.AgentSideConnection }
 
 func (a *testACPAgent) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {

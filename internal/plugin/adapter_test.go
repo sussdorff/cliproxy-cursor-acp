@@ -151,3 +151,47 @@ func TestPreprovisionedLoginPollReturnsAllAvailableAccounts(t *testing.T) {
 		t.Fatalf("host login flow = %#v", poll)
 	}
 }
+
+func TestDecodeRequestSessionPriorityAndTranscript(t *testing.T) {
+	cases := []struct {
+		name      string
+		metadata  map[string]any
+		payload   string
+		wantID    string
+		stateless bool
+		wantText  string
+	}{
+		{"derived", map[string]any{"derived_session_id": "derived"}, `{"messages":[{"role":"system","content":"rules"},{"role":"developer","content":"guard"},{"role":"user","content":[{"type":"text","text":"hello"}]},{"role":"assistant","content":"prior"}]}`, "derived", false, "[system] rules\n[developer] guard\n[user] hello\n[assistant] prior\n"},
+		{"execution", map[string]any{"execution_session_id": "execution"}, `{"messages":[{"role":"user","content":"hello"}]}`, "execution", false, "[user] hello\n"},
+		{"payload", nil, `{"session_id":"payload","messages":[{"role":"user","content":"hello"}]}`, "payload", false, "[user] hello\n"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			prompt, id, stateless, err := decodeRequest(pluginapi.ExecutorRequest{Metadata: test.metadata, Payload: []byte(test.payload)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if id != test.wantID || stateless != test.stateless || prompt != test.wantText {
+				t.Fatalf("got %q %q %v", prompt, id, stateless)
+			}
+		})
+	}
+}
+
+func TestParseAuthReturnsOnlyStoredAccount(t *testing.T) {
+	accounts := []cursor.Account{{AuthID: "a", Model: "auto"}, {AuthID: "b", Model: "auto"}}
+	config := testConfig(t, accounts)
+	service, _ := cursor.NewService(config, testFactory{})
+	adapter, _ := New(service, config.Accounts, config.WorkspaceRoot, availableProbe{})
+	response, err := adapter.ParseAuth(context.Background(), pluginapi.AuthParseRequest{RawJSON: []byte(`{"auth_id":"b"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.Handled || response.Auth.ID != "b" || len(response.Auths) != 0 {
+		t.Fatalf("parse = %#v", response)
+	}
+	response, err = adapter.ParseAuth(context.Background(), pluginapi.AuthParseRequest{RawJSON: []byte(`{"auth_id":"missing"}`)})
+	if err != nil || response.Handled {
+		t.Fatalf("unknown parse = %#v %v", response, err)
+	}
+}

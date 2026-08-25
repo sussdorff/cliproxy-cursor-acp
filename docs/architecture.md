@@ -40,12 +40,17 @@ only. ACP context usage is not a Cursor subscription quota.
 
 The native plugin entrypoint speaks CLIProxyAPI's public ABI. It registers auth,
 model, executor, and usage capabilities. The executor accepts a canonical
-OpenAI chat payload. A host `conversation_id` or `request_id` metadata key
-supplies affinity when available; otherwise it creates a cryptographically
+OpenAI chat payload. A host `derived_session_id`, then `execution_session_id`,
+supplies affinity. Explicit payload `session_id`, `conversation_id`, and
+`prompt_cache_key` are the fallback. Otherwise it creates a cryptographically
 random stateless turn key so identical requests from separate callers cannot
 reuse ACP state. It does not require client-added `conversation_id` or
 `working_directory` fields and uses only the configured workspace root. The
 host-selected `AuthID` is mandatory.
+
+Stateless turns close their ACP session at completion and remove both account
+session and conversation-affinity entries. Stable host session identities reuse
+their account-scoped ACP session.
 
 ## Lifecycle and failures
 
