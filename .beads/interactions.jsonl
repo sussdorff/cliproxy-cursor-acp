@@ -1,0 +1,1 @@
+{"id":"int-f7b372351c84aea6474ec300a7d7d048","kind":"field_change","created_at":"2026-08-25T17:59:05.052588Z","actor":"Malte Sussdorff","issue_id":"cca-mcu","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Implemented, independently reviewed, security-reviewed, race-tested, built as a native plugin, and documented."}}
