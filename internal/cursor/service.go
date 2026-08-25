@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -229,6 +230,10 @@ func (s *Service) invalidate(authID string, client ACPClient) {
 func classifyACPError(code string, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return retryable(code, err)
+	}
+	text := strings.ToLower(err.Error())
+	if strings.Contains(text, "invalid params") || strings.Contains(text, "method not found") || strings.Contains(text, "authentication") || strings.Contains(text, "model") {
+		return fatal(code, err)
 	}
 	return retryable(code, err)
 }

@@ -171,6 +171,12 @@ func dispatchValue(method string, raw []byte) (any, error) {
 			return nil, err
 		}
 		return adapter.CountTokens(ctx, request)
+	case pluginabi.MethodExecutorHTTPRequest:
+		var request pluginapi.ExecutorHTTPRequest
+		if err := json.Unmarshal(raw, &request); err != nil {
+			return nil, err
+		}
+		return adapter.HttpRequest(ctx, request)
 	case pluginabi.MethodUsageHandle:
 		var request pluginapi.UsageRecord
 		if err := json.Unmarshal(raw, &request); err != nil {

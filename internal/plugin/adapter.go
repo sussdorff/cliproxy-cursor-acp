@@ -51,11 +51,18 @@ func (a *Adapter) ParseAuth(_ context.Context, request pluginapi.AuthParseReques
 	if request.Provider != "" && request.Provider != cursor.ProviderID {
 		return pluginapi.AuthParseResponse{Handled: false}, nil
 	}
-	auths := make([]pluginapi.AuthData, 0, len(a.accounts))
-	for _, account := range a.accounts {
-		auths = append(auths, a.authData(context.Background(), account))
+	var stored struct {
+		AuthID string `json:"auth_id"`
 	}
-	return pluginapi.AuthParseResponse{Handled: true, Auths: auths}, nil
+	if err := json.Unmarshal(request.RawJSON, &stored); err != nil || strings.TrimSpace(stored.AuthID) == "" {
+		return pluginapi.AuthParseResponse{Handled: false}, nil
+	}
+	account, ok := a.accounts[stored.AuthID]
+	if !ok {
+		return pluginapi.AuthParseResponse{Handled: false}, nil
+	}
+	auth := a.authData(context.Background(), account)
+	return pluginapi.AuthParseResponse{Handled: true, Auth: auth}, nil
 }
 
 // StartLogin intentionally directs operators to the official CLI. The plugin
@@ -98,19 +105,27 @@ func (a *Adapter) ModelsForAuth(_ context.Context, request pluginapi.AuthModelRe
 	if !ok {
 		return pluginapi.ModelResponse{}, cursor.ErrUnknownAuth
 	}
-	return pluginapi.ModelResponse{Provider: cursor.ProviderID, Models: []pluginapi.ModelInfo{{ID: account.Model, Object: "model", OwnedBy: "cursor", Name: account.Model, DisplayName: account.Model, Type: "chat-completion", SupportedInputModalities: []string{"text"}}}}, nil
+	return pluginapi.ModelResponse{Provider: cursor.ProviderID, Models: []pluginapi.ModelInfo{{ID: "cursor/" + account.Model, Object: "model", OwnedBy: "cursor", Name: account.Model, DisplayName: account.Model, Type: "chat-completion", SupportedInputModalities: []string{"text"}}}}, nil
 }
 
 func (a *Adapter) Execute(ctx context.Context, request pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-	prompt, conversationID, err := decodeRequest(request)
+	prompt, conversationID, stateless, err := decodeRequest(request)
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
-	result, err := a.service.Execute(ctx, cursor.Request{AuthID: request.AuthID, ConversationID: conversationID, Prompt: prompt, WorkingDir: a.workspaceRoot})
+	account, ok := a.accounts[request.AuthID]
+	if !ok {
+		return pluginapi.ExecutorResponse{}, cursor.ValidationFailure("unknown_auth", "selected account is not configured")
+	}
+	actualModel := "cursor/" + account.Model
+	if request.Model != "" && request.Model != actualModel {
+		return pluginapi.ExecutorResponse{}, cursor.ValidationFailure("model_mismatch", "selected account does not provide requested model")
+	}
+	result, err := a.service.Execute(ctx, cursor.Request{AuthID: request.AuthID, ConversationID: conversationID, Prompt: prompt, WorkingDir: a.workspaceRoot, Stateless: stateless})
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
-	payload, err := json.Marshal(map[string]any{"id": conversationID, "object": "chat.completion", "model": request.Model, "choices": []map[string]any{{"index": 0, "message": map[string]string{"role": "assistant", "content": result.Text}, "finish_reason": "stop"}}, "usage": map[string]int64{"prompt_tokens": result.InputTokens, "completion_tokens": result.OutputTokens, "total_tokens": result.InputTokens + result.OutputTokens}})
+	payload, err := json.Marshal(map[string]any{"id": conversationID, "object": "chat.completion", "model": actualModel, "choices": []map[string]any{{"index": 0, "message": map[string]string{"role": "assistant", "content": result.Text}, "finish_reason": "stop"}}, "usage": map[string]int64{"prompt_tokens": result.InputTokens, "completion_tokens": result.OutputTokens, "total_tokens": result.InputTokens + result.OutputTokens}})
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
@@ -141,46 +156,77 @@ func (a *Adapter) authData(ctx context.Context, account cursor.Account) pluginap
 	if available {
 		status = "available"
 	}
-	return pluginapi.AuthData{Provider: cursor.ProviderID, ID: account.AuthID, Label: account.Label, Prefix: "cursor/", Disabled: !available, StorageJSON: storage, Metadata: map[string]any{"authenticated": available, "status": status, "subscription_quota_available": false, "exact_subscription_quota": nil, "observed_input_tokens": metadata.ObservedInputTokens, "observed_output_tokens": metadata.ObservedOutputTokens}, Attributes: map[string]string{"model": account.Model}}
+	return pluginapi.AuthData{Provider: cursor.ProviderID, ID: account.AuthID, Label: account.Label, Prefix: "cursor", Disabled: !available, StorageJSON: storage, Metadata: map[string]any{"status": status, "subscription_quota_available": false, "exact_subscription_quota": nil, "observed_input_tokens": metadata.ObservedInputTokens, "observed_output_tokens": metadata.ObservedOutputTokens}, Attributes: map[string]string{"model": "cursor/" + account.Model}}
 }
 
-func decodeRequest(executor pluginapi.ExecutorRequest) (prompt, conversationID string, err error) {
+func decodeRequest(executor pluginapi.ExecutorRequest) (prompt, conversationID string, stateless bool, err error) {
 	payload := executor.Payload
 	var request struct {
-		Prompt   string `json:"prompt"`
-		Messages []struct {
+		SessionID      string `json:"session_id"`
+		ConversationID string `json:"conversation_id"`
+		PromptCacheKey string `json:"prompt_cache_key"`
+		Prompt         string `json:"prompt"`
+		Messages       []struct {
 			Role    string `json:"role"`
 			Content any    `json:"content"`
 		} `json:"messages"`
 	}
 	if err = json.Unmarshal(payload, &request); err != nil {
-		return "", "", cursorFailure("invalid_request", "request must be JSON")
+		return "", "", false, cursorFailure("invalid_request", "request must be JSON")
 	}
 	prompt = request.Prompt
-	if prompt == "" {
-		for _, message := range request.Messages {
-			if message.Role == "user" {
-				if text, ok := message.Content.(string); ok {
-					prompt += text
-				}
-			}
+	for _, message := range request.Messages {
+		text, ok := contentText(message.Content)
+		if !ok {
+			return "", "", false, cursorFailure("invalid_request", "OpenAI message content must be text")
 		}
+		prompt += "[" + message.Role + "] " + text + "\n"
 	}
 	if strings.TrimSpace(prompt) == "" {
-		return "", "", cursorFailure("invalid_request", "OpenAI request requires a text user message")
+		return "", "", false, cursorFailure("invalid_request", "OpenAI request requires text content")
 	}
-	if candidate, ok := executor.Metadata["conversation_id"].(string); ok && strings.TrimSpace(candidate) != "" {
-		conversationID = candidate
-	} else if candidate, ok := executor.Metadata["request_id"].(string); ok && strings.TrimSpace(candidate) != "" {
-		conversationID = candidate
-	} else {
+	for _, key := range []string{"derived_session_id", "execution_session_id"} {
+		if candidate, ok := executor.Metadata[key].(string); ok && strings.TrimSpace(candidate) != "" {
+			return prompt, candidate, false, nil
+		}
+	}
+	for _, candidate := range []string{request.SessionID, request.ConversationID, request.PromptCacheKey} {
+		if strings.TrimSpace(candidate) != "" {
+			return prompt, candidate, false, nil
+		}
+	}
+	{
 		identifier := make([]byte, 16)
 		if _, err := rand.Read(identifier); err != nil {
-			return "", "", cursor.ValidationFailure("conversation_id_unavailable", "could not create request identity")
+			return "", "", false, cursor.ValidationFailure("conversation_id_unavailable", "could not create request identity")
 		}
 		conversationID = "stateless-" + hex.EncodeToString(identifier)
 	}
-	return prompt, conversationID, nil
+	return prompt, conversationID, true, nil
+}
+
+func contentText(value any) (string, bool) {
+	if text, ok := value.(string); ok {
+		return text, true
+	}
+	parts, ok := value.([]any)
+	if !ok {
+		return "", false
+	}
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		object, ok := part.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		kind, _ := object["type"].(string)
+		text, _ := object["text"].(string)
+		if kind != "text" {
+			return "", false
+		}
+		values = append(values, text)
+	}
+	return strings.Join(values, "\n"), true
 }
 
 func cursorFailure(code, message string) error { return cursor.ValidationFailure(code, message) }

@@ -17,6 +17,11 @@ own process group; shutdown sends TERM, then bounded KILL, and reaps the child.
 ACP output is collected per serialized turn and capped before it reaches a
 response.
 
+An unrelated global Cursor API key, including one used by other local ACP
+tools, is intentionally stripped. Plugin production authentication remains the
+official per-account `CURSOR_CONFIG_DIR` profile; forwarding a global key would
+collapse `AuthID` account isolation.
+
 Profile and workspace paths are canonicalized at startup. They must be real
 directories owned by the service user with no group/other permissions; duplicate
 or symlink-alias profiles are rejected. Do not mount a profile directory into

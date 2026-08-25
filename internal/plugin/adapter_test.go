@@ -78,7 +78,7 @@ func TestRegistrationExposesCLIProxyAPICapabilities(t *testing.T) {
 	if auth.Auth.Metadata["subscription_quota_available"] != false || auth.Auth.Metadata["exact_subscription_quota"] != nil {
 		t.Fatalf("quota metadata = %#v", auth.Auth.Metadata)
 	}
-	if auth.Auth.Disabled || auth.Auth.Metadata["authenticated"] != true {
+	if auth.Auth.Disabled || auth.Auth.Metadata["status"] != "available" {
 		t.Fatalf("provisioned account status = %#v", auth.Auth)
 	}
 }
@@ -117,11 +117,11 @@ func TestExecutorAcceptsCanonicalOpenAIRequestWithoutPluginFields(t *testing.T) 
 
 func TestMetadataFreeRequestsHaveDistinctStatelessSessions(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{"messages": []map[string]string{{"role": "user", "content": "hello"}}})
-	_, first, err := decodeRequest(pluginapi.ExecutorRequest{AuthID: "cursor-a", Payload: payload})
+	_, first, _, err := decodeRequest(pluginapi.ExecutorRequest{AuthID: "cursor-a", Payload: payload})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, second, err := decodeRequest(pluginapi.ExecutorRequest{AuthID: "cursor-a", Payload: payload})
+	_, second, _, err := decodeRequest(pluginapi.ExecutorRequest{AuthID: "cursor-a", Payload: payload})
 	if err != nil {
 		t.Fatal(err)
 	}
