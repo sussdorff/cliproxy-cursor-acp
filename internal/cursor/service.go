@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 var ErrUnknownAuth = errors.New("selected Cursor AuthID is not configured")
@@ -43,6 +44,8 @@ type Service struct {
 	factory          Factory
 	sem              chan struct{}
 	maxPromptBytes   int
+	workspaceRoot    string
+	timeout          time.Duration
 }
 
 // Factory starts a new ACP peer using the selected account only.
@@ -58,7 +61,9 @@ type ACPClient interface {
 }
 
 func NewService(config Config, factory Factory) (*Service, error) {
-	if err := config.validate(); err != nil {
+	var err error
+	config, err = NormalizeConfig(config)
+	if err != nil {
 		return nil, err
 	}
 	if factory == nil {
@@ -68,7 +73,7 @@ func NewService(config Config, factory Factory) (*Service, error) {
 	for _, account := range config.Accounts {
 		accounts[account.AuthID] = &accountRuntime{account: account, sessions: make(map[string]string)}
 	}
-	return &Service{accounts: accounts, conversationAuth: make(map[string]string), factory: factory, sem: make(chan struct{}, config.MaxConcurrent), maxPromptBytes: config.MaxPromptBytes}, nil
+	return &Service{accounts: accounts, conversationAuth: make(map[string]string), factory: factory, sem: make(chan struct{}, config.MaxConcurrent), maxPromptBytes: config.MaxPromptBytes, workspaceRoot: config.WorkspaceRoot, timeout: config.Timeout}, nil
 }
 
 // Execute starts or reuses the ACP session for exactly the selected AuthID.
@@ -83,7 +88,10 @@ func (s *Service) Execute(ctx context.Context, request Request) (Result, error) 
 		return Result{}, fatal("prompt_too_large", fmt.Errorf("prompt exceeds configured maximum"))
 	}
 	if request.WorkingDir == "" {
-		return Result{}, fatal("missing_working_directory", fmt.Errorf("working directory is required"))
+		request.WorkingDir = s.workspaceRoot
+	}
+	if request.WorkingDir != s.workspaceRoot {
+		return Result{}, fatal("invalid_working_directory", fmt.Errorf("working directory must be configured workspace root"))
 	}
 	s.mu.Lock()
 	if s.accounts[request.AuthID] == nil {
@@ -91,9 +99,7 @@ func (s *Service) Execute(ctx context.Context, request Request) (Result, error) 
 		return Result{}, fatal("unknown_auth", ErrUnknownAuth)
 	}
 	boundAuth := s.conversationAuth[request.ConversationID]
-	if boundAuth == "" {
-		s.conversationAuth[request.ConversationID] = request.AuthID
-	} else if boundAuth != request.AuthID {
+	if boundAuth != "" && boundAuth != request.AuthID {
 		s.mu.Unlock()
 		return Result{}, fatal("conversation_account_mismatch", fmt.Errorf("conversation is already bound to selected AuthID %q", boundAuth))
 	}
@@ -104,18 +110,22 @@ func (s *Service) Execute(ctx context.Context, request Request) (Result, error) 
 	case <-ctx.Done():
 		return Result{}, retryable("request_cancelled", ctx.Err())
 	}
+	executionCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 
-	runtime, err := s.ensureAccountClient(ctx, request.AuthID)
+	runtime, err := s.ensureAccountClient(executionCtx, request.AuthID)
 	if err != nil {
+		s.rollbackAffinity(request.ConversationID, request.AuthID)
 		return Result{}, err
 	}
 	s.mu.Lock()
 	sessionID := runtime.sessions[request.ConversationID]
 	s.mu.Unlock()
 	if sessionID == "" {
-		sessionID, err = runtime.client.NewSession(ctx, request.WorkingDir)
+		sessionID, err = runtime.client.NewSession(executionCtx, request.WorkingDir)
 		if err != nil {
 			s.invalidate(request.AuthID, runtime.client)
+			s.rollbackAffinity(request.ConversationID, request.AuthID)
 			return Result{}, classifyACPError("session_start_failed", err)
 		}
 		s.mu.Lock()
@@ -128,10 +138,14 @@ func (s *Service) Execute(ctx context.Context, request Request) (Result, error) 
 		}
 		s.mu.Unlock()
 	}
-	result, err := runtime.client.Prompt(ctx, sessionID, request.Prompt)
+	if err := s.commitAffinity(request.ConversationID, request.AuthID); err != nil {
+		return Result{}, err
+	}
+	result, err := runtime.client.Prompt(executionCtx, sessionID, request.Prompt)
 	if err != nil {
-		if ctx.Err() != nil {
-			return Result{}, retryable("request_cancelled", ctx.Err())
+		if executionCtx.Err() != nil {
+			s.invalidate(request.AuthID, runtime.client)
+			return Result{}, retryable("request_cancelled", executionCtx.Err())
 		}
 		s.invalidate(request.AuthID, runtime.client)
 		return Result{}, classifyACPError("agent_process_failed", err)
@@ -141,6 +155,24 @@ func (s *Service) Execute(ctx context.Context, request Request) (Result, error) 
 	runtime.outputTokens += result.OutputTokens
 	s.mu.Unlock()
 	return result, nil
+}
+
+func (s *Service) commitAffinity(conversationID, authID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if bound := s.conversationAuth[conversationID]; bound != "" && bound != authID {
+		return fatal("conversation_account_mismatch", fmt.Errorf("conversation is already bound to selected AuthID %q", bound))
+	}
+	s.conversationAuth[conversationID] = authID
+	return nil
+}
+
+func (s *Service) rollbackAffinity(conversationID, authID string) {
+	s.mu.Lock()
+	if s.conversationAuth[conversationID] == authID {
+		delete(s.conversationAuth, conversationID)
+	}
+	s.mu.Unlock()
 }
 
 func (s *Service) ensureAccountClient(ctx context.Context, authID string) (*accountRuntime, error) {

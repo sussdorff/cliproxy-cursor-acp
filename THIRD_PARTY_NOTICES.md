@@ -9,6 +9,8 @@ The production ACP transport uses
 `v0.13.5`. That dependency is licensed under the Apache License, Version 2.0.
 Its license remains applicable to that dependency; it does not change the MIT
 license of this repository's original source code.
+The complete Apache-2.0 license text is included at
+[`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt).
 
 No source code from Cursor's private Connect protocol or from repositories
 without a usable source license is included in this repository.

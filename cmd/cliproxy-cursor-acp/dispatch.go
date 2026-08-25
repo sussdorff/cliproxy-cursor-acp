@@ -44,7 +44,8 @@ var state struct {
 func dispatch(method string, raw []byte) ([]byte, bool) {
 	value, err := dispatchValue(method, raw)
 	if err != nil {
-		return errorEnvelope("cursor_acp_error", err.Error(), retryable(err)), true
+		code, message, status, canRetry := publicError(err)
+		return errorEnvelopeStatus(code, message, status, canRetry), true
 	}
 	encoded, err := json.Marshal(value)
 	if err != nil {
@@ -54,8 +55,21 @@ func dispatch(method string, raw []byte) ([]byte, bool) {
 	return result, false
 }
 func errorEnvelope(code, message string, canRetry bool) []byte {
-	raw, _ := json.Marshal(pluginabi.Envelope{OK: false, Error: &pluginabi.Error{Code: code, Message: message, HTTPStatus: http.StatusBadGateway, Retryable: canRetry}})
+	return errorEnvelopeStatus(code, message, http.StatusBadRequest, canRetry)
+}
+func errorEnvelopeStatus(code, message string, status int, canRetry bool) []byte {
+	raw, _ := json.Marshal(pluginabi.Envelope{OK: false, Error: &pluginabi.Error{Code: code, Message: message, HTTPStatus: status, Retryable: canRetry}})
 	return raw
+}
+func publicError(err error) (string, string, int, bool) {
+	failure := new(cursor.Failure)
+	if errorAs(err, failure) {
+		if failure.Kind == cursor.FailureRetryable {
+			return failure.Code, "Cursor account is temporarily unavailable", http.StatusBadGateway, true
+		}
+		return failure.Code, "Cursor request was rejected", http.StatusBadRequest, false
+	}
+	return "cursor_acp_error", "Cursor plugin request failed", http.StatusBadGateway, false
 }
 func retryable(err error) bool {
 	failure := new(cursor.Failure)
@@ -78,6 +92,9 @@ func errorAs(err error, target *cursor.Failure) bool {
 }
 
 func dispatchValue(method string, raw []byte) (any, error) {
+	if len(raw) > int(maxABIRequestBytes) {
+		return nil, fmt.Errorf("request too large")
+	}
 	if method == pluginabi.MethodPluginRegister || method == pluginabi.MethodPluginReconfigure {
 		return configure(raw)
 	}
@@ -159,6 +176,9 @@ func dispatchValue(method string, raw []byte) (any, error) {
 func configure(raw []byte) (registration, error) {
 	var request lifecycleRequest
 	if len(raw) > 0 {
+		if len(raw) > 256<<10 {
+			return registration{}, fmt.Errorf("configuration request too large")
+		}
 		if err := json.Unmarshal(raw, &request); err != nil {
 			return registration{}, err
 		}
@@ -167,11 +187,16 @@ func configure(raw []byte) (registration, error) {
 	if err := yaml.Unmarshal(request.ConfigYAML, &config); err != nil {
 		return registration{}, fmt.Errorf("parse plugin configuration: %w", err)
 	}
-	service, err := cursor.NewService(config, cursor.CommandFactory{Executable: config.Executable})
+	config, err := cursor.NormalizeConfig(config)
 	if err != nil {
 		return registration{}, err
 	}
-	adapter, err := plugin.New(service, config.Accounts)
+	factory := cursor.CommandFactory{Executable: config.Executable, MaxOutputBytes: config.MaxOutputBytes, StartupTimeout: config.Timeout}
+	service, err := cursor.NewService(config, factory)
+	if err != nil {
+		return registration{}, err
+	}
+	adapter, err := plugin.New(service, config.Accounts, config.WorkspaceRoot, factory)
 	if err != nil {
 		_ = service.Close()
 		return registration{}, err
@@ -182,7 +207,7 @@ func configure(raw []byte) (registration, error) {
 	state.service = service
 	state.Unlock()
 	registered := adapter.Registration()
-	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: registered.Metadata, Capabilities: capabilities{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"openai"}, ExecutorOutputFormats: []string{"openai"}, UsagePlugin: true}}, nil
+	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: registered.Metadata, Capabilities: capabilities{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"openai-chat", "openai-response"}, ExecutorOutputFormats: []string{"openai-chat", "openai-response"}, UsagePlugin: true}}, nil
 }
 func shutdown() {
 	state.Lock()

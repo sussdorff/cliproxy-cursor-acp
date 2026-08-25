@@ -3,6 +3,7 @@ package plugin
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -18,11 +19,13 @@ const Version = "0.1.0"
 // Adapter is registered for auth, model, execution, and usage capability
 // surfaces. It deliberately never selects an auth candidate itself.
 type Adapter struct {
-	service  *cursor.Service
-	accounts map[string]cursor.Account
+	service       *cursor.Service
+	accounts      map[string]cursor.Account
+	workspaceRoot string
+	prober        cursor.ProfileProber
 }
 
-func New(service *cursor.Service, accounts []cursor.Account) (*Adapter, error) {
+func New(service *cursor.Service, accounts []cursor.Account, workspaceRoot string, prober cursor.ProfileProber) (*Adapter, error) {
 	if service == nil {
 		return nil, fmt.Errorf("cursor service is required")
 	}
@@ -30,14 +33,14 @@ func New(service *cursor.Service, accounts []cursor.Account) (*Adapter, error) {
 	for _, account := range accounts {
 		byID[account.AuthID] = account
 	}
-	return &Adapter{service: service, accounts: byID}, nil
+	return &Adapter{service: service, accounts: byID, workspaceRoot: workspaceRoot, prober: prober}, nil
 }
 
 func (a *Adapter) Registration() pluginapi.Plugin {
 	return pluginapi.Plugin{SchemaVersion: 2, Metadata: pluginapi.Metadata{Name: "cliproxy-cursor-acp", Version: Version, Author: "Malte Sussdorff", GitHubRepository: "https://github.com/sussdorff/cliproxy-cursor-acp"}, Capabilities: pluginapi.Capabilities{
 		AuthProvider: a, ModelProvider: a, Executor: a, UsagePlugin: a,
 		ExecutorModelScope:   pluginapi.ExecutorModelScopeOAuth,
-		ExecutorInputFormats: []string{"openai"}, ExecutorOutputFormats: []string{"openai"},
+		ExecutorInputFormats: []string{"openai-chat", "openai-response"}, ExecutorOutputFormats: []string{"openai-chat", "openai-response"},
 	}}
 }
 
@@ -49,25 +52,41 @@ func (a *Adapter) ParseAuth(_ context.Context, request pluginapi.AuthParseReques
 	}
 	auths := make([]pluginapi.AuthData, 0, len(a.accounts))
 	for _, account := range a.accounts {
-		auths = append(auths, a.authData(account))
+		auths = append(auths, a.authData(context.Background(), account))
 	}
 	return pluginapi.AuthParseResponse{Handled: true, Auths: auths}, nil
 }
 
 // StartLogin intentionally directs operators to the official CLI. The plugin
 // does not read, write, or transport credential material.
-func (a *Adapter) StartLogin(_ context.Context, _ pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
-	return pluginapi.AuthLoginStartResponse{Provider: cursor.ProviderID, State: "official-cli-required", ExpiresAt: time.Now().Add(15 * time.Minute), Metadata: map[string]any{"instruction": "Run `CURSOR_CONFIG_DIR=<private-profile> agent login` for the account, then refresh auth."}}, nil
+func (a *Adapter) StartLogin(_ context.Context, request pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+	authID, _ := request.Metadata["auth_id"].(string)
+	if _, ok := a.accounts[authID]; !ok {
+		return pluginapi.AuthLoginStartResponse{}, cursorFailure("unknown_auth", "select a configured Cursor account")
+	}
+	return pluginapi.AuthLoginStartResponse{Provider: cursor.ProviderID, State: authID, ExpiresAt: time.Now().Add(15 * time.Minute), Metadata: map[string]any{"instruction": "Run `CURSOR_CONFIG_DIR=<private-profile> agent login` for the selected configured account, then poll this state."}}, nil
 }
-func (a *Adapter) PollLogin(_ context.Context, _ pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
-	return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusPending, Message: "authentication remains owned by the official Cursor Agent CLI"}, nil
+func (a *Adapter) PollLogin(ctx context.Context, request pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+	account, ok := a.accounts[request.State]
+	if !ok {
+		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "unknown configured Cursor account"}, nil
+	}
+	if a.prober == nil {
+		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "official Cursor CLI status probing is unavailable"}, nil
+	}
+	available, err := a.prober.Probe(ctx, account)
+	if err != nil || !available {
+		return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusError, Message: "Cursor CLI profile is not authenticated or unavailable"}, nil
+	}
+	auth := a.authData(ctx, account)
+	return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusSuccess, Message: "official Cursor CLI profile is available", Auth: auth, Auths: []pluginapi.AuthData{auth}}, nil
 }
-func (a *Adapter) RefreshAuth(_ context.Context, request pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+func (a *Adapter) RefreshAuth(ctx context.Context, request pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
 	account, ok := a.accounts[request.AuthID]
 	if !ok {
 		return pluginapi.AuthRefreshResponse{}, cursor.ErrUnknownAuth
 	}
-	return pluginapi.AuthRefreshResponse{Auth: a.authData(account), NextRefreshAfter: time.Now().Add(5 * time.Minute)}, nil
+	return pluginapi.AuthRefreshResponse{Auth: a.authData(ctx, account), NextRefreshAfter: time.Now().Add(5 * time.Minute)}, nil
 }
 
 func (a *Adapter) StaticModels(context.Context, pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
@@ -82,11 +101,11 @@ func (a *Adapter) ModelsForAuth(_ context.Context, request pluginapi.AuthModelRe
 }
 
 func (a *Adapter) Execute(ctx context.Context, request pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-	prompt, conversationID, workingDir, err := decodeRequest(request.Payload)
+	prompt, conversationID, err := decodeRequest(request)
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
-	result, err := a.service.Execute(ctx, cursor.Request{AuthID: request.AuthID, ConversationID: conversationID, Prompt: prompt, WorkingDir: workingDir})
+	result, err := a.service.Execute(ctx, cursor.Request{AuthID: request.AuthID, ConversationID: conversationID, Prompt: prompt, WorkingDir: a.workspaceRoot})
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
@@ -107,40 +126,57 @@ func (a *Adapter) HttpRequest(context.Context, pluginapi.ExecutorHTTPRequest) (p
 }
 func (a *Adapter) HandleUsage(context.Context, pluginapi.UsageRecord) {}
 
-func (a *Adapter) authData(account cursor.Account) pluginapi.AuthData {
+func (a *Adapter) authData(ctx context.Context, account cursor.Account) pluginapi.AuthData {
 	metadata, err := a.service.Metadata(account.AuthID)
 	if err != nil {
 		metadata = cursor.Metadata{AuthID: account.AuthID, Label: account.Label, Status: "unavailable", SubscriptionQuotaAvailable: false}
 	}
-	storage, _ := json.Marshal(map[string]string{"type": cursor.ProviderID, "auth_id": account.AuthID, "profile": "official-cli-private-profile"})
-	return pluginapi.AuthData{Provider: cursor.ProviderID, ID: account.AuthID, Label: account.Label, Prefix: "cursor/", StorageJSON: storage, Metadata: map[string]any{"authenticated": metadata.Authenticated, "status": metadata.Status, "subscription_quota_available": false, "exact_subscription_quota": nil, "observed_input_tokens": metadata.ObservedInputTokens, "observed_output_tokens": metadata.ObservedOutputTokens}, Attributes: map[string]string{"model": account.Model}}
+	available := false
+	if a.prober != nil {
+		available, _ = a.prober.Probe(ctx, account)
+	}
+	storage, _ := json.Marshal(map[string]string{"type": cursor.ProviderID, "auth_id": account.AuthID})
+	status := "unauthenticated"
+	if available {
+		status = "available"
+	}
+	return pluginapi.AuthData{Provider: cursor.ProviderID, ID: account.AuthID, Label: account.Label, Prefix: "cursor/", Disabled: !available, StorageJSON: storage, Metadata: map[string]any{"authenticated": available, "status": status, "subscription_quota_available": false, "exact_subscription_quota": nil, "observed_input_tokens": metadata.ObservedInputTokens, "observed_output_tokens": metadata.ObservedOutputTokens}, Attributes: map[string]string{"model": account.Model}}
 }
 
-func decodeRequest(payload []byte) (prompt, conversationID, workingDir string, err error) {
+func decodeRequest(executor pluginapi.ExecutorRequest) (prompt, conversationID string, err error) {
+	payload := executor.Payload
 	var request struct {
-		ConversationID string `json:"conversation_id"`
-		WorkingDir     string `json:"working_directory"`
-		Prompt         string `json:"prompt"`
-		Messages       []struct {
+		Prompt   string `json:"prompt"`
+		Messages []struct {
 			Role    string `json:"role"`
-			Content string `json:"content"`
+			Content any    `json:"content"`
 		} `json:"messages"`
 	}
 	if err = json.Unmarshal(payload, &request); err != nil {
-		return "", "", "", cursorFailure("invalid_request", "request must be JSON")
+		return "", "", cursorFailure("invalid_request", "request must be JSON")
 	}
-	prompt, conversationID, workingDir = request.Prompt, request.ConversationID, request.WorkingDir
+	prompt = request.Prompt
 	if prompt == "" {
 		for _, message := range request.Messages {
 			if message.Role == "user" {
-				prompt = message.Content
+				if text, ok := message.Content.(string); ok {
+					prompt += text
+				}
 			}
 		}
 	}
-	if strings.TrimSpace(prompt) == "" || strings.TrimSpace(conversationID) == "" || strings.TrimSpace(workingDir) == "" {
-		return "", "", "", cursorFailure("invalid_request", "prompt, conversation_id, and working_directory are required")
+	if strings.TrimSpace(prompt) == "" {
+		return "", "", cursorFailure("invalid_request", "OpenAI request requires a text user message")
 	}
-	return prompt, conversationID, workingDir, nil
+	if candidate, ok := executor.Metadata["conversation_id"].(string); ok && strings.TrimSpace(candidate) != "" {
+		conversationID = candidate
+	} else if candidate, ok := executor.Metadata["request_id"].(string); ok && strings.TrimSpace(candidate) != "" {
+		conversationID = candidate
+	} else {
+		sum := sha256.Sum256(append(append([]byte(executor.AuthID+"\x00"), payload...), 0))
+		conversationID = fmt.Sprintf("stateless-%x", sum[:12])
+	}
+	return prompt, conversationID, nil
 }
 
 func cursorFailure(code, message string) error { return fmt.Errorf("%s: %s", code, message) }

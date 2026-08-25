@@ -68,6 +68,22 @@ func TestCommandFactoryCancelsAndCleansUpChild(t *testing.T) {
 	}
 }
 
+func TestCommandFactoryBoundsACPOutput(t *testing.T) {
+	factory := CommandFactory{Executable: os.Args[0], Arguments: []string{"-test.run=TestACPHelperProcess", "--"}, BaseEnv: os.Environ(), TestEnvironment: []string{"GO_WANT_FAKE_ACP=1"}, MaxOutputBytes: 3}
+	client, err := factory.Start(context.Background(), Account{AuthID: "cursor-a", ProfileDir: "/private/cursor-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	session, err := client.NewSession(context.Background(), "/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Prompt(context.Background(), session, "hello"); err == nil {
+		t.Fatal("oversized ACP output succeeded")
+	}
+}
+
 type testACPAgent struct{ connection *acp.AgentSideConnection }
 
 func (a *testACPAgent) Initialize(context.Context, acp.InitializeRequest) (acp.InitializeResponse, error) {

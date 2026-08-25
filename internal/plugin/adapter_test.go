@@ -3,7 +3,11 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"github.com/sussdorff/cliproxy-cursor-acp/internal/cursor"
@@ -23,13 +27,39 @@ func (testACP) Prompt(context.Context, string, string) (cursor.Result, error) {
 }
 func (testACP) Close() error { return nil }
 
-func TestRegistrationExposesCLIProxyAPICapabilities(t *testing.T) {
-	accounts := []cursor.Account{{AuthID: "cursor-a", Label: "Cursor A", ProfileDir: "/profiles/a", Model: "cursor/auto"}}
-	service, err := cursor.NewService(cursor.Config{Executable: "agent", Accounts: accounts, MaxConcurrent: 1, MaxPromptBytes: 100}, testFactory{})
+type availableProbe struct{}
+
+func (availableProbe) Probe(context.Context, cursor.Account) (bool, error) { return true, nil }
+
+func testConfig(t *testing.T, accounts []cursor.Account) cursor.Config {
+	t.Helper()
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for index := range accounts {
+		accounts[index].ProfileDir = filepath.Join(root, accounts[index].AuthID)
+		if err := os.MkdirAll(accounts[index].ProfileDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config, err := cursor.NormalizeConfig(cursor.Config{Executable: "agent", Accounts: accounts, MaxConcurrent: 1, MaxPromptBytes: 100, MaxOutputBytes: 100, WorkspaceRoot: workspace, Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter, err := New(service, accounts)
+	return config
+}
+
+func TestRegistrationExposesCLIProxyAPICapabilities(t *testing.T) {
+	accounts := []cursor.Account{{AuthID: "cursor-a", Label: "Cursor A", ProfileDir: "/profiles/a", Model: "cursor/auto"}}
+	config := testConfig(t, accounts)
+	accounts = config.Accounts
+	service, err := cursor.NewService(config, testFactory{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := New(service, accounts, config.WorkspaceRoot, availableProbe{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,15 +77,39 @@ func TestRegistrationExposesCLIProxyAPICapabilities(t *testing.T) {
 	if auth.Auth.Metadata["subscription_quota_available"] != false || auth.Auth.Metadata["exact_subscription_quota"] != nil {
 		t.Fatalf("quota metadata = %#v", auth.Auth.Metadata)
 	}
+	if auth.Auth.Disabled || auth.Auth.Metadata["authenticated"] != true {
+		t.Fatalf("provisioned account status = %#v", auth.Auth)
+	}
 }
 
 func TestExecutorUsesHostSelectedAuthID(t *testing.T) {
-	accounts := []cursor.Account{{AuthID: "cursor-a", ProfileDir: "/profiles/a", Model: "cursor/auto"}}
-	service, _ := cursor.NewService(cursor.Config{Executable: "agent", Accounts: accounts, MaxConcurrent: 1, MaxPromptBytes: 100}, testFactory{})
-	adapter, _ := New(service, accounts)
-	payload, _ := json.Marshal(map[string]string{"prompt": "hello", "conversation_id": "conversation", "working_directory": "/work"})
+	accounts := []cursor.Account{{AuthID: "cursor-a", Model: "cursor/auto"}}
+	config := testConfig(t, accounts)
+	accounts = config.Accounts
+	service, _ := cursor.NewService(config, testFactory{})
+	adapter, _ := New(service, accounts, config.WorkspaceRoot, nil)
+	payload, _ := json.Marshal(map[string]any{"messages": []map[string]string{{"role": "user", "content": "hello"}}})
 	_, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: "other-account", Payload: payload, Model: "cursor/auto"})
 	if err == nil {
 		t.Fatal("executor accepted a non-configured selected AuthID")
+	}
+}
+
+func TestExecutorAcceptsCanonicalOpenAIRequestWithoutPluginFields(t *testing.T) {
+	accounts := []cursor.Account{{AuthID: "cursor-a", Model: "cursor/auto"}}
+	config := testConfig(t, accounts)
+	accounts = config.Accounts
+	service, err := cursor.NewService(config, testFactory{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, _ := New(service, accounts, config.WorkspaceRoot, availableProbe{})
+	payload, _ := json.Marshal(map[string]any{"model": "cursor/auto", "messages": []map[string]string{{"role": "user", "content": "hello"}}})
+	response, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: "cursor-a", Model: "cursor/auto", Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(response.Payload), "\"content\":\"ok\"") {
+		t.Fatalf("response = %s", response.Payload)
 	}
 }

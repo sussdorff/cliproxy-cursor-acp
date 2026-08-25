@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
 type fakeFactory struct {
@@ -60,11 +62,22 @@ func (c *fakeClient) Close() error { c.mu.Lock(); c.closed = true; c.mu.Unlock()
 
 func testService(t *testing.T) (*Service, *fakeFactory) {
 	t.Helper()
+	root := t.TempDir()
+	profiles := root + "/profiles"
+	workspace := root + "/workspace"
+	for _, path := range []string{profiles + "/a", profiles + "/b", workspace} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	factory := &fakeFactory{}
 	service, err := NewService(Config{Executable: "agent", MaxConcurrent: 2, MaxPromptBytes: 1024, Accounts: []Account{
-		{AuthID: "cursor-a", Label: "A", ProfileDir: "/profiles/a", Model: "cursor/auto"},
-		{AuthID: "cursor-b", Label: "B", ProfileDir: "/profiles/b", Model: "cursor/auto"},
-	}}, factory)
+		{AuthID: "cursor-a", Label: "A", ProfileDir: profiles + "/a", Model: "cursor/auto"},
+		{AuthID: "cursor-b", Label: "B", ProfileDir: profiles + "/b", Model: "cursor/auto"},
+	}, MaxOutputBytes: 1024, WorkspaceRoot: workspace, Timeout: time.Second}, factory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,8 +96,8 @@ func TestServiceRequiresSelectedAuthID(t *testing.T) {
 func TestServiceKeepsAccountsAndSessionsIsolatedUnderConcurrency(t *testing.T) {
 	service, factory := testService(t)
 	requests := []Request{
-		{AuthID: "cursor-a", ConversationID: "conversation-a", Prompt: "one", WorkingDir: "/work/a"},
-		{AuthID: "cursor-b", ConversationID: "conversation-b", Prompt: "two", WorkingDir: "/work/b"},
+		{AuthID: "cursor-a", ConversationID: "conversation-a", Prompt: "one"},
+		{AuthID: "cursor-b", ConversationID: "conversation-b", Prompt: "two"},
 	}
 	var wg sync.WaitGroup
 	errs := make(chan error, len(requests))
@@ -116,7 +129,7 @@ func TestServiceKeepsAccountsAndSessionsIsolatedUnderConcurrency(t *testing.T) {
 		}
 	}
 
-	result, err := service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "conversation-a", Prompt: "again", WorkingDir: "/work/a"})
+	result, err := service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "conversation-a", Prompt: "again"})
 	if err != nil || result.Text != "cursor-a:again" {
 		t.Fatalf("affinity result = %#v, %v", result, err)
 	}
@@ -127,11 +140,11 @@ func TestServiceKeepsAccountsAndSessionsIsolatedUnderConcurrency(t *testing.T) {
 
 func TestServiceRefusesToMigrateConversationToAnotherAccount(t *testing.T) {
 	service, _ := testService(t)
-	_, err := service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "conversation", Prompt: "one", WorkingDir: "/work"})
+	_, err := service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "conversation", Prompt: "one"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.Execute(context.Background(), Request{AuthID: "cursor-b", ConversationID: "conversation", Prompt: "two", WorkingDir: "/work"})
+	_, err = service.Execute(context.Background(), Request{AuthID: "cursor-b", ConversationID: "conversation", Prompt: "two"})
 	var failure *Failure
 	if !errors.As(err, &failure) || failure.Kind != FailureFatal || failure.Code != "conversation_account_mismatch" {
 		t.Fatalf("migration error = %#v", err)
@@ -142,18 +155,18 @@ func TestServiceClassifiesCancellationAndProcessFailureForFailover(t *testing.T)
 	service, factory := testService(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := service.Execute(ctx, Request{AuthID: "cursor-a", ConversationID: "cancelled", Prompt: "hello", WorkingDir: "/work"})
+	_, err := service.Execute(ctx, Request{AuthID: "cursor-a", ConversationID: "cancelled", Prompt: "hello"})
 	var failure *Failure
 	if !errors.As(err, &failure) || failure.Kind != FailureRetryable {
 		t.Fatalf("cancel error = %#v", err)
 	}
 
-	_, err = service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "failed", Prompt: "hello", WorkingDir: "/work"})
+	_, err = service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "failed", Prompt: "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	factory.clients["cursor-a"].fail = true
-	_, err = service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "failed", Prompt: "again", WorkingDir: "/work"})
+	_, err = service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "failed", Prompt: "again"})
 	if !errors.As(err, &failure) || failure.Kind != FailureRetryable || failure.Code != "agent_process_failed" {
 		t.Fatalf("process error = %#v", err)
 	}
@@ -161,7 +174,7 @@ func TestServiceClassifiesCancellationAndProcessFailureForFailover(t *testing.T)
 
 func TestMetadataReportsObservedUseNotSubscriptionQuota(t *testing.T) {
 	service, _ := testService(t)
-	_, err := service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "usage", Prompt: "hello", WorkingDir: "/work"})
+	_, err := service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "usage", Prompt: "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}

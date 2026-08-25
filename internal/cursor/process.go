@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	acp "github.com/coder/acp-go-sdk"
 )
@@ -21,6 +22,27 @@ type CommandFactory struct {
 	// Arguments is test-only when non-empty. Production uses exactly "acp".
 	Arguments       []string
 	TestEnvironment []string
+	MaxOutputBytes  int
+	StartupTimeout  time.Duration
+}
+
+// ProfileProber supplies evidence that an official CLI profile is usable. It
+// never reads credential files; a successful `agent models` invocation is the
+// only evidence used for the pre-provisioned account flow.
+type ProfileProber interface {
+	Probe(context.Context, Account) (bool, error)
+}
+
+func (f CommandFactory) Probe(ctx context.Context, account Account) (bool, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(probeCtx, f.Executable, "models")
+	command.Env = isolatedEnv(f.BaseEnv, account.ProfileDir)
+	output, err := command.Output()
+	if err != nil || len(strings.TrimSpace(string(output))) == 0 {
+		return false, err
+	}
+	return true, nil
 }
 
 func (f CommandFactory) Start(ctx context.Context, account Account) (ACPClient, error) {
@@ -28,7 +50,10 @@ func (f CommandFactory) Start(ctx context.Context, account Account) (ACPClient, 
 	if len(arguments) == 0 {
 		arguments = []string{"acp"}
 	}
-	command := exec.CommandContext(ctx, f.Executable, arguments...)
+	if len(f.Arguments) == 0 && account.Model != "" {
+		arguments = append(arguments, "--model", account.Model)
+	}
+	command := exec.Command(f.Executable, arguments...)
 	command.Env = append(isolatedEnv(f.BaseEnv, account.ProfileDir), f.TestEnvironment...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := command.StdinPipe()
@@ -42,9 +67,19 @@ func (f CommandFactory) Start(ctx context.Context, account Account) (ACPClient, 
 	if err := command.Start(); err != nil {
 		return nil, fmt.Errorf("start Cursor ACP: %w", err)
 	}
-	client := &acpProcess{command: command, stdin: stdin}
+	maxOutput := f.MaxOutputBytes
+	if maxOutput <= 0 {
+		maxOutput = 1 << 20
+	}
+	client := &acpProcess{command: command, stdin: stdin, maxOutputBytes: maxOutput}
 	client.connection = acp.NewClientSideConnection(client, stdin, stdout)
-	if _, err := client.connection.Initialize(ctx, acp.InitializeRequest{
+	startupTimeout := f.StartupTimeout
+	if startupTimeout <= 0 {
+		startupTimeout = 30 * time.Second
+	}
+	startupCtx, cancel := context.WithTimeout(ctx, startupTimeout)
+	defer cancel()
+	if _, err := client.connection.Initialize(startupCtx, acp.InitializeRequest{
 		ProtocolVersion:    acp.ProtocolVersionNumber,
 		ClientCapabilities: acp.ClientCapabilities{},
 		ClientInfo:         &acp.Implementation{Name: "cliproxy-cursor-acp", Version: "development"},
@@ -76,12 +111,21 @@ func isolatedEnv(base []string, profileDir string) []string {
 }
 
 type acpProcess struct {
-	command    *exec.Cmd
-	stdin      io.WriteCloser
-	connection *acp.ClientSideConnection
-	updates    strings.Builder
-	mu         sync.Mutex
-	closeOnce  sync.Once
+	command        *exec.Cmd
+	stdin          io.WriteCloser
+	connection     *acp.ClientSideConnection
+	promptMu       sync.Mutex
+	mu             sync.Mutex
+	collector      *collector
+	maxOutputBytes int
+	closeOnce      sync.Once
+}
+
+type collector struct {
+	sessionID string
+	text      strings.Builder
+	overflow  bool
+	active    bool
 }
 
 func (p *acpProcess) NewSession(ctx context.Context, cwd string) (string, error) {
@@ -93,16 +137,30 @@ func (p *acpProcess) NewSession(ctx context.Context, cwd string) (string, error)
 }
 
 func (p *acpProcess) Prompt(ctx context.Context, sessionID, prompt string) (Result, error) {
+	p.promptMu.Lock()
+	defer p.promptMu.Unlock()
 	p.mu.Lock()
-	p.updates.Reset()
+	p.collector = &collector{sessionID: sessionID, active: true}
 	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		if p.collector != nil {
+			p.collector.active = false
+			p.collector = nil
+		}
+		p.mu.Unlock()
+	}()
 	response, err := p.connection.Prompt(ctx, acp.PromptRequest{SessionId: acp.SessionId(sessionID), Prompt: []acp.ContentBlock{acp.TextBlock(prompt)}})
 	if err != nil {
 		return Result{}, err
 	}
 	p.mu.Lock()
-	text := p.updates.String()
+	text := p.collector.text.String()
+	overflow := p.collector.overflow
 	p.mu.Unlock()
+	if overflow {
+		return Result{}, fmt.Errorf("ACP output exceeded configured limit")
+	}
 	result := Result{Text: text}
 	if response.Usage != nil {
 		result.InputTokens = int64(response.Usage.InputTokens)
@@ -118,7 +176,16 @@ func (p *acpProcess) Close() error {
 		if p.command.Process != nil {
 			_ = syscall.Kill(-p.command.Process.Pid, syscall.SIGTERM)
 		}
-		closeErr = p.command.Wait()
+		wait := make(chan error, 1)
+		go func() { wait <- p.command.Wait() }()
+		select {
+		case closeErr = <-wait:
+		case <-time.After(time.Second):
+			if p.command.Process != nil {
+				_ = syscall.Kill(-p.command.Process.Pid, syscall.SIGKILL)
+			}
+			closeErr = <-wait
+		}
 	})
 	return closeErr
 }
@@ -135,7 +202,13 @@ func (p *acpProcess) RequestPermission(_ context.Context, request acp.RequestPer
 func (p *acpProcess) SessionUpdate(_ context.Context, notification acp.SessionNotification) error {
 	if text := notification.Update.AgentMessageChunk; text != nil && text.Content.Text != nil {
 		p.mu.Lock()
-		p.updates.WriteString(text.Content.Text.Text)
+		if p.collector != nil && p.collector.active && p.collector.sessionID == string(notification.SessionId) {
+			if p.collector.text.Len()+len(text.Content.Text.Text) > p.maxOutputBytes {
+				p.collector.overflow = true
+			} else {
+				p.collector.text.WriteString(text.Content.Text.Text)
+			}
+		}
 		p.mu.Unlock()
 	}
 	return nil

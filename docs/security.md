@@ -13,11 +13,15 @@ The child process gets direct argv only: `agent acp`. No shell is invoked. Its
 environment keeps a small allowlist (`PATH`, `HOME`, temporary-directory,
 terminal, and locale settings), removes `CURSOR_API_KEY`, replaces any inherited
 `CURSOR_CONFIG_DIR`, and sets the selected account's directory. It runs in its
-own process group; cancellation and shutdown terminate that group.
+own process group; shutdown sends TERM, then bounded KILL, and reaps the child.
+ACP output is collected per serialized turn and capped before it reaches a
+response.
 
-Never configure two accounts with the same profile directory. Do not mount a
-profile directory into other containers, log its contents, or place credentials
-in CLIProxyAPI auth records/configuration.
+Profile and workspace paths are canonicalized at startup. They must be real
+directories owned by the service user with no group/other permissions; duplicate
+or symlink-alias profiles are rejected. Do not mount a profile directory into
+other containers, log its contents, or place credentials in CLIProxyAPI auth
+records/configuration.
 
 ## Management data
 

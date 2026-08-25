@@ -2,6 +2,9 @@
 executable: /usr/local/bin/agent
 max_concurrent: 2
 max_prompt_bytes: 524288
+max_output_bytes: 1048576
+timeout: 2m
+workspace_root: /srv/cliproxy-cursor-acp/workspace
 accounts:
   - auth_id: cursor-personal
     label: Personal Cursor subscription

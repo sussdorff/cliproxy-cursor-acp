@@ -18,7 +18,8 @@ remaining subscription quota.
 ## Status and limitations
 
 - Native CLIProxyAPI ABI registration exposes auth, model, executor, and usage capabilities.
-- The current executor returns a completed OpenAI-compatible response after an ACP turn. Streaming and preflight token counting return explicit unsupported errors.
+- The current executor accepts canonical OpenAI chat payloads and returns a completed OpenAI-compatible response after an ACP turn. Streaming and preflight token counting return explicit unsupported errors.
+- Native ABI execution is bounded by the configured `timeout`. CLIProxyAPI's native ABI does not currently carry a request-cancellation handle, so the plugin does not claim end-to-end host cancellation through that ABI.
 - CPA Manager Plus can use generic Auth Files and Quota Management views. Account label/status, configured model, retry/failure state, and observed ACP tokens are available. `subscription_quota_available` is always `false` until Cursor publishes an official exact quota source through the CLI or ACP.
 
 ## Build
@@ -48,6 +49,11 @@ CURSOR_CONFIG_DIR=/srv/cursor-profiles/cursor-b agent login
 Then use [config/cliproxy-cursor-acp.yaml](config/cliproxy-cursor-acp.yaml).
 `auth_id` is the bridge to CLIProxyAPI's scheduler and must remain stable. Do
 not place tokens, browser cookies, or profile file contents in the YAML.
+
+The profile and workspace directories must already exist, be owned by the
+service user, and have mode `0700` (or stricter). The pre-provisioned flow
+creates one host auth record per configured `auth_id`; it reports an account as
+available only when `agent models` succeeds under that account's private profile.
 
 For operational and security detail, see [architecture](docs/architecture.md)
 and [security](docs/security.md).
