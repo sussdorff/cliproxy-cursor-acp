@@ -20,6 +20,22 @@ func TestACPHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestProbeHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_FAKE_PROBE") != "1" {
+		return
+	}
+	if os.Getenv("FAKE_PROBE_MODE") == "large" {
+		_, _ = os.Stdout.Write(make([]byte, (64<<10)+1))
+		os.Exit(0)
+	}
+	if os.Getenv("FAKE_PROBE_MODE") == "sleep" {
+		time.Sleep(12 * time.Second)
+		os.Exit(0)
+	}
+	_, _ = os.Stdout.WriteString("model\n")
+	os.Exit(0)
+}
+
 func TestCommandFactoryUsesStdioACPAndPrivateProfile(t *testing.T) {
 	factory := CommandFactory{Executable: os.Args[0], Arguments: []string{"-test.run=TestACPHelperProcess", "--"}, BaseEnv: append(os.Environ(), "CURSOR_API_KEY=must-not-reach-child"), TestEnvironment: []string{"GO_WANT_FAKE_ACP=1"}}
 	client, err := factory.Start(context.Background(), Account{AuthID: "cursor-a", ProfileDir: "/private/cursor-a"})
@@ -89,6 +105,21 @@ func TestProbeBufferRejectsLargeOutput(t *testing.T) {
 	_, _ = buffer.Write(make([]byte, (64<<10)+1))
 	if !buffer.overflow {
 		t.Fatal("large probe output was not bounded")
+	}
+}
+
+func TestProbeSupervisionBoundsOutputAndTimeout(t *testing.T) {
+	account := Account{ProfileDir: "/private/cursor-a"}
+	for _, mode := range []string{"large", "sleep"} {
+		t.Run(mode, func(t *testing.T) {
+			factory := CommandFactory{Executable: os.Args[0], ProbeArguments: []string{"-test.run=TestProbeHelperProcess", "--"}, ProbeEnvironment: []string{"GO_WANT_FAKE_PROBE=1", "FAKE_PROBE_MODE=" + mode}}
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			available, err := factory.Probe(ctx, account)
+			if err == nil || available {
+				t.Fatalf("probe %s = %v, %v", mode, available, err)
+			}
+		})
 	}
 }
 

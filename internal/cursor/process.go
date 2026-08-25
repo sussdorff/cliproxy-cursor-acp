@@ -20,10 +20,12 @@ type CommandFactory struct {
 	Executable string
 	BaseEnv    []string
 	// Arguments is test-only when non-empty. Production uses exactly "acp".
-	Arguments       []string
-	TestEnvironment []string
-	MaxOutputBytes  int
-	StartupTimeout  time.Duration
+	Arguments        []string
+	TestEnvironment  []string
+	ProbeArguments   []string
+	ProbeEnvironment []string
+	MaxOutputBytes   int
+	StartupTimeout   time.Duration
 }
 
 // ProfileProber supplies evidence that an official CLI profile is usable. It
@@ -36,8 +38,12 @@ type ProfileProber interface {
 func (f CommandFactory) Probe(ctx context.Context, account Account) (bool, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	command := exec.Command(f.Executable, "models")
-	command.Env = isolatedEnv(f.BaseEnv, account.ProfileDir)
+	arguments := f.ProbeArguments
+	if len(arguments) == 0 {
+		arguments = []string{"models"}
+	}
+	command := exec.Command(f.Executable, arguments...)
+	command.Env = append(isolatedEnv(f.BaseEnv, account.ProfileDir), f.ProbeEnvironment...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
