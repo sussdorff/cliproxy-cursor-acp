@@ -54,6 +54,16 @@ func dispatch(method string, raw []byte) ([]byte, bool) {
 	result, _ := json.Marshal(pluginabi.Envelope{OK: true, Result: encoded})
 	return result, false
 }
+
+func safeDispatch(method string, raw []byte) (result []byte, failed bool) {
+	defer func() {
+		if recover() != nil {
+			result = errorEnvelopeStatus("internal_error", "Cursor plugin internal error", http.StatusInternalServerError, false)
+			failed = true
+		}
+	}()
+	return dispatch(method, raw)
+}
 func errorEnvelope(code, message string, canRetry bool) []byte {
 	return errorEnvelopeStatus(code, message, http.StatusBadRequest, canRetry)
 }

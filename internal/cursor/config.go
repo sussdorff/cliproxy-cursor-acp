@@ -25,6 +25,9 @@ func (a Account) validate() error {
 	if strings.TrimSpace(a.AuthID) == "" {
 		return fmt.Errorf("cursor account AuthID is required")
 	}
+	if strings.TrimSpace(a.Model) == "" || strings.Contains(a.Model, "/") {
+		return fmt.Errorf("cursor account %q model must be a bare Cursor model name", a.AuthID)
+	}
 	if !filepath.IsAbs(a.ProfileDir) {
 		return fmt.Errorf("cursor account %q profile directory must be absolute", a.AuthID)
 	}

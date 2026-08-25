@@ -76,7 +76,7 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 		writeEnvelope(response, errorEnvelope("invalid_request", "invalid plugin request", false))
 		return 1
 	}
-	result, failed := dispatch(methodName, raw)
+	result, failed := safeDispatch(methodName, raw)
 	writeEnvelope(response, result)
 	if failed {
 		return 1

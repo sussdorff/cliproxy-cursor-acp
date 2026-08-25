@@ -9,8 +9,8 @@ accounts:
   - auth_id: cursor-personal
     label: Personal Cursor subscription
     profile_dir: /srv/cursor-profiles/cursor-personal
-    model: cursor/auto
+    model: auto
   - auth_id: cursor-work
     label: Work Cursor subscription
     profile_dir: /srv/cursor-profiles/cursor-work
-    model: cursor/auto
+    model: auto

@@ -17,6 +17,7 @@ type Request struct {
 	ConversationID string
 	Prompt         string
 	WorkingDir     string
+	Stateless      bool
 }
 
 // Result reports ACP output plus optional observed token figures. These values
@@ -33,6 +34,7 @@ type accountRuntime struct {
 	sessions     map[string]string
 	inputTokens  int64
 	outputTokens int64
+	turn         chan struct{}
 }
 
 // Service keeps every ACP process and ACP session inside the selected AuthID.
@@ -57,6 +59,7 @@ type Factory interface {
 type ACPClient interface {
 	NewSession(context.Context, string) (string, error)
 	Prompt(context.Context, string, string) (Result, error)
+	CloseSession(context.Context, string) error
 	Close() error
 }
 
@@ -71,7 +74,7 @@ func NewService(config Config, factory Factory) (*Service, error) {
 	}
 	accounts := make(map[string]*accountRuntime, len(config.Accounts))
 	for _, account := range config.Accounts {
-		accounts[account.AuthID] = &accountRuntime{account: account, sessions: make(map[string]string)}
+		accounts[account.AuthID] = &accountRuntime{account: account, sessions: make(map[string]string), turn: make(chan struct{}, 1)}
 	}
 	return &Service{accounts: accounts, conversationAuth: make(map[string]string), factory: factory, sem: make(chan struct{}, config.MaxConcurrent), maxPromptBytes: config.MaxPromptBytes, workspaceRoot: config.WorkspaceRoot, timeout: config.Timeout}, nil
 }
@@ -94,7 +97,8 @@ func (s *Service) Execute(ctx context.Context, request Request) (Result, error) 
 		return Result{}, fatal("invalid_working_directory", fmt.Errorf("working directory must be configured workspace root"))
 	}
 	s.mu.Lock()
-	if s.accounts[request.AuthID] == nil {
+	runtime := s.accounts[request.AuthID]
+	if runtime == nil {
 		s.mu.Unlock()
 		return Result{}, fatal("unknown_auth", ErrUnknownAuth)
 	}
@@ -105,6 +109,12 @@ func (s *Service) Execute(ctx context.Context, request Request) (Result, error) 
 	}
 	s.mu.Unlock()
 	select {
+	case runtime.turn <- struct{}{}:
+		defer func() { <-runtime.turn }()
+	case <-ctx.Done():
+		return Result{}, retryable("request_cancelled", ctx.Err())
+	}
+	select {
 	case s.sem <- struct{}{}:
 		defer func() { <-s.sem }()
 	case <-ctx.Done():
@@ -113,19 +123,17 @@ func (s *Service) Execute(ctx context.Context, request Request) (Result, error) 
 	executionCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	runtime, err := s.ensureAccountClient(executionCtx, request.AuthID)
+	client, err := s.ensureAccountClient(executionCtx, runtime)
 	if err != nil {
-		s.rollbackAffinity(request.ConversationID, request.AuthID)
 		return Result{}, err
 	}
 	s.mu.Lock()
 	sessionID := runtime.sessions[request.ConversationID]
 	s.mu.Unlock()
 	if sessionID == "" {
-		sessionID, err = runtime.client.NewSession(executionCtx, request.WorkingDir)
+		sessionID, err = client.NewSession(executionCtx, request.WorkingDir)
 		if err != nil {
-			s.invalidate(request.AuthID, runtime.client)
-			s.rollbackAffinity(request.ConversationID, request.AuthID)
+			s.invalidate(request.AuthID, client)
 			return Result{}, classifyACPError("session_start_failed", err)
 		}
 		s.mu.Lock()
@@ -141,13 +149,16 @@ func (s *Service) Execute(ctx context.Context, request Request) (Result, error) 
 	if err := s.commitAffinity(request.ConversationID, request.AuthID); err != nil {
 		return Result{}, err
 	}
-	result, err := runtime.client.Prompt(executionCtx, sessionID, request.Prompt)
+	if request.Stateless {
+		defer s.releaseStateless(request.AuthID, request.ConversationID, client, sessionID)
+	}
+	result, err := client.Prompt(executionCtx, sessionID, request.Prompt)
 	if err != nil {
 		if executionCtx.Err() != nil {
-			s.invalidate(request.AuthID, runtime.client)
+			s.invalidate(request.AuthID, client)
 			return Result{}, retryable("request_cancelled", executionCtx.Err())
 		}
-		s.invalidate(request.AuthID, runtime.client)
+		s.invalidate(request.AuthID, client)
 		return Result{}, classifyACPError("agent_process_failed", err)
 	}
 	s.mu.Lock()
@@ -167,24 +178,12 @@ func (s *Service) commitAffinity(conversationID, authID string) error {
 	return nil
 }
 
-func (s *Service) rollbackAffinity(conversationID, authID string) {
+func (s *Service) ensureAccountClient(ctx context.Context, runtime *accountRuntime) (ACPClient, error) {
 	s.mu.Lock()
-	if s.conversationAuth[conversationID] == authID {
-		delete(s.conversationAuth, conversationID)
-	}
-	s.mu.Unlock()
-}
-
-func (s *Service) ensureAccountClient(ctx context.Context, authID string) (*accountRuntime, error) {
-	s.mu.Lock()
-	runtime := s.accounts[authID]
-	if runtime == nil {
-		s.mu.Unlock()
-		return nil, fatal("unknown_auth", ErrUnknownAuth)
-	}
 	if runtime.client != nil {
+		client := runtime.client
 		s.mu.Unlock()
-		return runtime, nil
+		return client, nil
 	}
 	account := runtime.account
 	s.mu.Unlock()
@@ -197,13 +196,23 @@ func (s *Service) ensureAccountClient(ctx context.Context, authID string) (*acco
 	if runtime.client == nil {
 		runtime.client = client
 		s.mu.Unlock()
-		return runtime, nil
+		return client, nil
 	}
 	existing := runtime.client
 	s.mu.Unlock()
 	_ = client.Close()
 	_ = existing
-	return runtime, nil
+	return existing, nil
+}
+
+func (s *Service) releaseStateless(authID, conversationID string, client ACPClient, sessionID string) {
+	_ = client.CloseSession(context.Background(), sessionID)
+	s.mu.Lock()
+	if runtime := s.accounts[authID]; runtime != nil && runtime.client == client {
+		delete(runtime.sessions, conversationID)
+	}
+	delete(s.conversationAuth, conversationID)
+	s.mu.Unlock()
 }
 
 func (s *Service) invalidate(authID string, client ACPClient) {
@@ -227,6 +236,20 @@ func classifyACPError(code string, err error) error {
 // Close terminates all account-owned child processes. It never shares a
 // process across AuthIDs and is safe to call repeatedly.
 func (s *Service) Close() error {
+	s.mu.Lock()
+	runtimes := make([]*accountRuntime, 0, len(s.accounts))
+	for _, runtime := range s.accounts {
+		runtimes = append(runtimes, runtime)
+	}
+	s.mu.Unlock()
+	for _, runtime := range runtimes {
+		runtime.turn <- struct{}{}
+	}
+	defer func() {
+		for _, runtime := range runtimes {
+			<-runtime.turn
+		}
+	}()
 	s.mu.Lock()
 	clients := make([]ACPClient, 0, len(s.accounts))
 	for _, runtime := range s.accounts {

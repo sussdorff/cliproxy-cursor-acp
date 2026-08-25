@@ -58,7 +58,8 @@ func (c *fakeClient) Prompt(ctx context.Context, sessionID, prompt string) (Resu
 	}
 	return Result{Text: c.authID + ":" + prompt, InputTokens: 3, OutputTokens: 5}, nil
 }
-func (c *fakeClient) Close() error { c.mu.Lock(); c.closed = true; c.mu.Unlock(); return nil }
+func (c *fakeClient) Close() error                               { c.mu.Lock(); c.closed = true; c.mu.Unlock(); return nil }
+func (c *fakeClient) CloseSession(context.Context, string) error { return nil }
 
 func testService(t *testing.T) (*Service, *fakeFactory) {
 	t.Helper()
@@ -75,8 +76,8 @@ func testService(t *testing.T) (*Service, *fakeFactory) {
 	}
 	factory := &fakeFactory{}
 	service, err := NewService(Config{Executable: os.Args[0], MaxConcurrent: 2, MaxPromptBytes: 1024, Accounts: []Account{
-		{AuthID: "cursor-a", Label: "A", ProfileDir: profiles + "/a", Model: "cursor/auto"},
-		{AuthID: "cursor-b", Label: "B", ProfileDir: profiles + "/b", Model: "cursor/auto"},
+		{AuthID: "cursor-a", Label: "A", ProfileDir: profiles + "/a", Model: "auto"},
+		{AuthID: "cursor-b", Label: "B", ProfileDir: profiles + "/b", Model: "auto"},
 	}, MaxOutputBytes: 1024, WorkspaceRoot: workspace, Timeout: time.Second}, factory)
 	if err != nil {
 		t.Fatal(err)
@@ -188,4 +189,28 @@ func TestMetadataReportsObservedUseNotSubscriptionQuota(t *testing.T) {
 	if metadata.ObservedInputTokens != 3 || metadata.ObservedOutputTokens != 5 {
 		t.Fatalf("observed usage = %#v", metadata)
 	}
+}
+
+func TestSameAccountTurnQueueSurvivesConcurrentFailure(t *testing.T) {
+	service, factory := testService(t)
+	var group sync.WaitGroup
+	errorsOut := make(chan error, 8)
+	for index := 0; index < 8; index++ {
+		index := index
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			_, err := service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: fmt.Sprintf("stress-%d", index), Prompt: "hello"})
+			errorsOut <- err
+		}()
+	}
+	group.Wait()
+	close(errorsOut)
+	for err := range errorsOut {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	factory.clients["cursor-a"].fail = true
+	_, _ = service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "failure", Prompt: "hello"})
 }

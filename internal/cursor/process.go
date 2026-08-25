@@ -195,6 +195,11 @@ func (p *acpProcess) NewSession(ctx context.Context, cwd string) (string, error)
 	return string(response.SessionId), nil
 }
 
+func (p *acpProcess) CloseSession(ctx context.Context, sessionID string) error {
+	_, err := p.connection.CloseSession(ctx, acp.CloseSessionRequest{SessionId: acp.SessionId(sessionID)})
+	return err
+}
+
 func (p *acpProcess) Prompt(ctx context.Context, sessionID, prompt string) (Result, error) {
 	p.promptMu.Lock()
 	defer p.promptMu.Unlock()

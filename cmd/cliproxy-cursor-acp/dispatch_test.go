@@ -20,6 +20,23 @@ func TestABIBounds(t *testing.T) {
 	}
 }
 
+func TestSafeDispatchRecoversPanic(t *testing.T) {
+	result, failed := guarded(func() ([]byte, bool) { panic("boom") })
+	if !failed || !strings.Contains(string(result), "internal_error") {
+		t.Fatalf("panic guard = %s", result)
+	}
+}
+
+func guarded(call func() ([]byte, bool)) (result []byte, failed bool) {
+	defer func() {
+		if recover() != nil {
+			result = errorEnvelopeStatus("internal_error", "Cursor plugin internal error", 500, false)
+			failed = true
+		}
+	}()
+	return call()
+}
+
 func TestDispatchRedactsSecretBearingErrors(t *testing.T) {
 	_, failed := dispatch("unsupported.method", []byte(`{"token":"secret-value"}`))
 	if !failed {
@@ -41,7 +58,7 @@ func TestConfigureRegistersRequiredCLIProxyCapabilities(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	config := []byte("executable: " + os.Args[0] + "\nmax_concurrent: 1\nmax_prompt_bytes: 100\nmax_output_bytes: 100\ntimeout: 1s\nworkspace_root: " + workspace + "\naccounts:\n  - auth_id: cursor-a\n    label: A\n    profile_dir: " + profile + "\n    model: cursor/auto\n")
+	config := []byte("executable: " + os.Args[0] + "\nmax_concurrent: 1\nmax_prompt_bytes: 100\nmax_output_bytes: 100\ntimeout: 1s\nworkspace_root: " + workspace + "\naccounts:\n  - auth_id: cursor-a\n    label: A\n    profile_dir: " + profile + "\n    model: auto\n")
 	raw, err := json.Marshal(lifecycleRequest{ConfigYAML: config})
 	if err != nil {
 		t.Fatal(err)

@@ -25,7 +25,8 @@ func (testACP) NewSession(context.Context, string) (string, error) { return "ses
 func (testACP) Prompt(context.Context, string, string) (cursor.Result, error) {
 	return cursor.Result{Text: "ok", InputTokens: 2, OutputTokens: 3}, nil
 }
-func (testACP) Close() error { return nil }
+func (testACP) Close() error                               { return nil }
+func (testACP) CloseSession(context.Context, string) error { return nil }
 
 type availableProbe struct{}
 
@@ -52,7 +53,7 @@ func testConfig(t *testing.T, accounts []cursor.Account) cursor.Config {
 }
 
 func TestRegistrationExposesCLIProxyAPICapabilities(t *testing.T) {
-	accounts := []cursor.Account{{AuthID: "cursor-a", Label: "Cursor A", ProfileDir: "/profiles/a", Model: "cursor/auto"}}
+	accounts := []cursor.Account{{AuthID: "cursor-a", Label: "Cursor A", ProfileDir: "/profiles/a", Model: "auto"}}
 	config := testConfig(t, accounts)
 	accounts = config.Accounts
 	service, err := cursor.NewService(config, testFactory{})
@@ -83,7 +84,7 @@ func TestRegistrationExposesCLIProxyAPICapabilities(t *testing.T) {
 }
 
 func TestExecutorUsesHostSelectedAuthID(t *testing.T) {
-	accounts := []cursor.Account{{AuthID: "cursor-a", Model: "cursor/auto"}}
+	accounts := []cursor.Account{{AuthID: "cursor-a", Model: "auto"}}
 	config := testConfig(t, accounts)
 	accounts = config.Accounts
 	service, _ := cursor.NewService(config, testFactory{})
@@ -96,7 +97,7 @@ func TestExecutorUsesHostSelectedAuthID(t *testing.T) {
 }
 
 func TestExecutorAcceptsCanonicalOpenAIRequestWithoutPluginFields(t *testing.T) {
-	accounts := []cursor.Account{{AuthID: "cursor-a", Model: "cursor/auto"}}
+	accounts := []cursor.Account{{AuthID: "cursor-a", Model: "auto"}}
 	config := testConfig(t, accounts)
 	accounts = config.Accounts
 	service, err := cursor.NewService(config, testFactory{})
@@ -130,7 +131,7 @@ func TestMetadataFreeRequestsHaveDistinctStatelessSessions(t *testing.T) {
 }
 
 func TestPreprovisionedLoginPollReturnsAllAvailableAccounts(t *testing.T) {
-	accounts := []cursor.Account{{AuthID: "cursor-a"}, {AuthID: "cursor-b"}}
+	accounts := []cursor.Account{{AuthID: "cursor-a", Model: "auto"}, {AuthID: "cursor-b", Model: "auto"}}
 	config := testConfig(t, accounts)
 	accounts = config.Accounts
 	service, err := cursor.NewService(config, testFactory{})
