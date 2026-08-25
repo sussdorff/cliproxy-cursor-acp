@@ -1,0 +1,13 @@
+# Place this mapping under plugins.configs.cliproxy-cursor-acp in CLIProxyAPI.
+executable: /usr/local/bin/agent
+max_concurrent: 2
+max_prompt_bytes: 524288
+accounts:
+  - auth_id: cursor-personal
+    label: Personal Cursor subscription
+    profile_dir: /srv/cursor-profiles/cursor-personal
+    model: cursor/auto
+  - auth_id: cursor-work
+    label: Work Cursor subscription
+    profile_dir: /srv/cursor-profiles/cursor-work
+    model: cursor/auto

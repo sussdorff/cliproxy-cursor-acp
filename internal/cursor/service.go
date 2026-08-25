@@ -1,0 +1,214 @@
+package cursor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+)
+
+var ErrUnknownAuth = errors.New("selected Cursor AuthID is not configured")
+
+// Request is the narrow seam between CLIProxyAPI's selected AuthID and ACP.
+// ConversationID is a host-owned stable client-conversation key.
+type Request struct {
+	AuthID         string
+	ConversationID string
+	Prompt         string
+	WorkingDir     string
+}
+
+// Result reports ACP output plus optional observed token figures. These values
+// are not subscription quota and must never be rendered as a paid balance.
+type Result struct {
+	Text         string
+	InputTokens  int64
+	OutputTokens int64
+}
+
+type accountRuntime struct {
+	account      Account
+	client       ACPClient
+	sessions     map[string]string
+	inputTokens  int64
+	outputTokens int64
+}
+
+// Service keeps every ACP process and ACP session inside the selected AuthID.
+// It intentionally has no account-selection algorithm: CLIProxyAPI owns that.
+type Service struct {
+	mu               sync.Mutex
+	accounts         map[string]*accountRuntime
+	conversationAuth map[string]string
+	factory          Factory
+	sem              chan struct{}
+	maxPromptBytes   int
+}
+
+// Factory starts a new ACP peer using the selected account only.
+type Factory interface {
+	Start(context.Context, Account) (ACPClient, error)
+}
+
+// ACPClient is the protocol-level session boundary used by the account pool.
+type ACPClient interface {
+	NewSession(context.Context, string) (string, error)
+	Prompt(context.Context, string, string) (Result, error)
+	Close() error
+}
+
+func NewService(config Config, factory Factory) (*Service, error) {
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+	if factory == nil {
+		return nil, fmt.Errorf("ACP factory is required")
+	}
+	accounts := make(map[string]*accountRuntime, len(config.Accounts))
+	for _, account := range config.Accounts {
+		accounts[account.AuthID] = &accountRuntime{account: account, sessions: make(map[string]string)}
+	}
+	return &Service{accounts: accounts, conversationAuth: make(map[string]string), factory: factory, sem: make(chan struct{}, config.MaxConcurrent), maxPromptBytes: config.MaxPromptBytes}, nil
+}
+
+// Execute starts or reuses the ACP session for exactly the selected AuthID.
+func (s *Service) Execute(ctx context.Context, request Request) (Result, error) {
+	if request.AuthID == "" {
+		return Result{}, fatal("missing_auth", fmt.Errorf("CLIProxyAPI must select AuthID before Cursor ACP execution"))
+	}
+	if request.ConversationID == "" {
+		return Result{}, fatal("missing_conversation", fmt.Errorf("conversation ID is required"))
+	}
+	if len(request.Prompt) > s.maxPromptBytes {
+		return Result{}, fatal("prompt_too_large", fmt.Errorf("prompt exceeds configured maximum"))
+	}
+	if request.WorkingDir == "" {
+		return Result{}, fatal("missing_working_directory", fmt.Errorf("working directory is required"))
+	}
+	s.mu.Lock()
+	if s.accounts[request.AuthID] == nil {
+		s.mu.Unlock()
+		return Result{}, fatal("unknown_auth", ErrUnknownAuth)
+	}
+	boundAuth := s.conversationAuth[request.ConversationID]
+	if boundAuth == "" {
+		s.conversationAuth[request.ConversationID] = request.AuthID
+	} else if boundAuth != request.AuthID {
+		s.mu.Unlock()
+		return Result{}, fatal("conversation_account_mismatch", fmt.Errorf("conversation is already bound to selected AuthID %q", boundAuth))
+	}
+	s.mu.Unlock()
+	select {
+	case s.sem <- struct{}{}:
+		defer func() { <-s.sem }()
+	case <-ctx.Done():
+		return Result{}, retryable("request_cancelled", ctx.Err())
+	}
+
+	runtime, err := s.ensureAccountClient(ctx, request.AuthID)
+	if err != nil {
+		return Result{}, err
+	}
+	s.mu.Lock()
+	sessionID := runtime.sessions[request.ConversationID]
+	s.mu.Unlock()
+	if sessionID == "" {
+		sessionID, err = runtime.client.NewSession(ctx, request.WorkingDir)
+		if err != nil {
+			s.invalidate(request.AuthID, runtime.client)
+			return Result{}, classifyACPError("session_start_failed", err)
+		}
+		s.mu.Lock()
+		// A competing request may have created the session. Keeping the first
+		// session preserves a single affinity per account/conversation.
+		if existing := runtime.sessions[request.ConversationID]; existing != "" {
+			sessionID = existing
+		} else {
+			runtime.sessions[request.ConversationID] = sessionID
+		}
+		s.mu.Unlock()
+	}
+	result, err := runtime.client.Prompt(ctx, sessionID, request.Prompt)
+	if err != nil {
+		if ctx.Err() != nil {
+			return Result{}, retryable("request_cancelled", ctx.Err())
+		}
+		s.invalidate(request.AuthID, runtime.client)
+		return Result{}, classifyACPError("agent_process_failed", err)
+	}
+	s.mu.Lock()
+	runtime.inputTokens += result.InputTokens
+	runtime.outputTokens += result.OutputTokens
+	s.mu.Unlock()
+	return result, nil
+}
+
+func (s *Service) ensureAccountClient(ctx context.Context, authID string) (*accountRuntime, error) {
+	s.mu.Lock()
+	runtime := s.accounts[authID]
+	if runtime == nil {
+		s.mu.Unlock()
+		return nil, fatal("unknown_auth", ErrUnknownAuth)
+	}
+	if runtime.client != nil {
+		s.mu.Unlock()
+		return runtime, nil
+	}
+	account := runtime.account
+	s.mu.Unlock()
+
+	client, err := s.factory.Start(ctx, account)
+	if err != nil {
+		return nil, classifyACPError("agent_start_failed", err)
+	}
+	s.mu.Lock()
+	if runtime.client == nil {
+		runtime.client = client
+		s.mu.Unlock()
+		return runtime, nil
+	}
+	existing := runtime.client
+	s.mu.Unlock()
+	_ = client.Close()
+	_ = existing
+	return runtime, nil
+}
+
+func (s *Service) invalidate(authID string, client ACPClient) {
+	s.mu.Lock()
+	runtime := s.accounts[authID]
+	if runtime != nil && runtime.client == client {
+		runtime.client = nil
+		runtime.sessions = make(map[string]string)
+	}
+	s.mu.Unlock()
+	_ = client.Close()
+}
+
+func classifyACPError(code string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return retryable(code, err)
+	}
+	return retryable(code, err)
+}
+
+// Close terminates all account-owned child processes. It never shares a
+// process across AuthIDs and is safe to call repeatedly.
+func (s *Service) Close() error {
+	s.mu.Lock()
+	clients := make([]ACPClient, 0, len(s.accounts))
+	for _, runtime := range s.accounts {
+		if runtime.client != nil {
+			clients = append(clients, runtime.client)
+			runtime.client = nil
+			runtime.sessions = make(map[string]string)
+		}
+	}
+	s.conversationAuth = make(map[string]string)
+	s.mu.Unlock()
+	var joined error
+	for _, client := range clients {
+		joined = errors.Join(joined, client.Close())
+	}
+	return joined
+}
