@@ -1,4 +1,4 @@
 # Beads configuration for this repository.
 issue-prefix: "cca"
 sync:
-    remote: "git+ssh://git@github.com/sussdorff/cliproxy-cursor-acp.git"
+    remote: "https://dolt.cognovis.de/beads_cliproxy_cursor_acp"
