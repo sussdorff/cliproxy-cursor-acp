@@ -16,7 +16,7 @@ import (
 	"github.com/sussdorff/cliproxy-cursor-acp/internal/cursor"
 )
 
-const Version = "0.2.2"
+const Version = "0.2.3"
 
 // Options collects the collaborators an adapter needs. Every account is created
 // at runtime by the login flow or reconstructed from a stored auth record.
@@ -90,8 +90,9 @@ func (a *Adapter) Registration() pluginapi.Plugin {
 
 func (a *Adapter) Identifier() string { return cursor.ProviderID }
 
-// ParseAuth rebuilds one runtime account from a stored auth record. This is the
-// only path by which an account survives a host restart.
+// ParseAuth restores an absent runtime account from a stored auth record. A
+// current-process registration wins over a replayed host record so an older
+// record cannot replace a profile created by a completed login.
 func (a *Adapter) ParseAuth(ctx context.Context, request pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
 	a.paths.ObserveHost(request.Host.AuthDir)
 	if request.Provider != "" && !strings.EqualFold(request.Provider, cursor.ProviderID) {
@@ -104,7 +105,7 @@ func (a *Adapter) ParseAuth(ctx context.Context, request pluginapi.AuthParseRequ
 	if strings.TrimSpace(stored.AuthID) == "" || strings.TrimSpace(stored.ProfileDir) == "" {
 		return pluginapi.AuthParseResponse{Handled: false}, nil
 	}
-	account, err := a.service.RegisterAccount(accountFromStored(stored))
+	account, err := a.service.RestoreAccountIfAbsent(accountFromStored(stored))
 	if err != nil {
 		return pluginapi.AuthParseResponse{Handled: false}, nil
 	}
@@ -172,7 +173,7 @@ func (a *Adapter) RefreshAuth(ctx context.Context, request pluginapi.AuthRefresh
 		if err := json.Unmarshal(request.StorageJSON, &stored); err != nil || strings.TrimSpace(stored.ProfileDir) == "" {
 			return pluginapi.AuthRefreshResponse{}, cursor.ErrUnknownAuth
 		}
-		registered, err := a.service.RegisterAccount(accountFromStored(stored))
+		registered, err := a.service.RestoreAccountIfAbsent(accountFromStored(stored))
 		if err != nil {
 			return pluginapi.AuthRefreshResponse{}, err
 		}
@@ -242,18 +243,47 @@ func accountFromStored(stored storedAuth) cursor.Account {
 	return cursor.Account{AuthID: strings.TrimSpace(stored.AuthID), Label: label, ProfileDir: strings.TrimSpace(stored.ProfileDir), Model: model, Email: strings.TrimSpace(stored.Email)}
 }
 
+const authDataProbeAttempts = 2
+
 func (a *Adapter) authData(ctx context.Context, account cursor.Account) pluginapi.AuthData {
-	metadata, err := a.service.Metadata(account.AuthID)
-	if err != nil {
-		metadata = cursor.Metadata{AuthID: account.AuthID, Label: account.Label, Status: "unavailable"}
+	// A probe can block while a re-login replaces the runtime profile. Re-probe
+	// the replacement before serializing so every response field names one
+	// account snapshot rather than mixing an old probe with new storage.
+	for attempt := 0; attempt < authDataProbeAttempts; attempt++ {
+		snapshot, metadata, err := a.service.AccountWithMetadata(account.AuthID)
+		if err != nil {
+			break
+		}
+		available := false
+		if a.prober != nil {
+			available, _ = a.prober.Probe(ctx, snapshot)
+		}
+		current, _, err := a.service.AccountWithMetadata(snapshot.AuthID)
+		if err == nil && current == snapshot {
+			return authDataFromSnapshot(snapshot, metadata, available, true)
+		}
+		if err != nil {
+			break
+		}
+		account = current
 	}
-	available := false
-	if a.prober != nil {
-		available, _ = a.prober.Probe(ctx, account)
+
+	// Repeated replacements cannot safely inherit a probe result. Return the
+	// latest complete snapshot as unavailable instead of combining fields from
+	// different profiles.
+	if snapshot, metadata, err := a.service.AccountWithMetadata(account.AuthID); err == nil {
+		return authDataFromSnapshot(snapshot, metadata, false, false)
 	}
+	return authDataFromSnapshot(account, cursor.Metadata{AuthID: account.AuthID, Label: account.Label, Status: "unavailable"}, false, false)
+}
+
+func authDataFromSnapshot(account cursor.Account, metadata cursor.Metadata, available, stable bool) pluginapi.AuthData {
 	storage, _ := json.Marshal(storedAuth{Type: cursor.ProviderID, AuthID: account.AuthID, ProfileDir: account.ProfileDir, Email: account.Email, Label: account.Label, Model: account.Model})
-	status := "unauthenticated"
-	if available {
+	status := "unavailable"
+	if stable && !available {
+		status = "unauthenticated"
+	}
+	if stable && available {
 		status = "available"
 	}
 	return pluginapi.AuthData{
