@@ -510,23 +510,29 @@ func extractAgentArchive(reader io.Reader, destination string, maxEntries int, m
 		if errPath != nil {
 			return "", fatal("agent_archive_unsafe", errPath)
 		}
+		// Keep the archive-controlled name and filesystem sink in the same
+		// containment check: target must remain below the extraction directory.
+		root := filepath.Clean(destination)
+		target := filepath.Clean(filepath.Join(root, name))
+		if !strings.HasPrefix(target, root+string(filepath.Separator)) {
+			return "", fatal("agent_archive_unsafe", fmt.Errorf("archive entry escapes its extraction directory"))
+		}
 		if _, duplicate := seen[name]; duplicate {
 			return "", fatal("agent_archive_unsafe", fmt.Errorf("the Cursor package contains a duplicate entry"))
 		}
 		seen[name] = struct{}{}
-		target := filepath.Join(destination, name)
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if errMkdir := os.MkdirAll(target, 0o700); errMkdir != nil {
-				return "", fatal("agent_archive_invalid", errMkdir)
+			if errMkdir := ensureArchiveDirectory(destination, name); errMkdir != nil {
+				return "", errMkdir
 			}
 		case tar.TypeReg:
 			expanded += header.Size
 			if expanded > maxExpanded {
 				return "", fatal("agent_archive_unsafe", fmt.Errorf("the Cursor package exceeds its expanded size limit"))
 			}
-			if errMkdir := os.MkdirAll(filepath.Dir(target), 0o700); errMkdir != nil {
-				return "", fatal("agent_archive_invalid", errMkdir)
+			if errMkdir := ensureArchiveDirectory(destination, filepath.Dir(name)); errMkdir != nil {
+				return "", errMkdir
 			}
 			file, errCreate := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, archiveMode(header.FileInfo().Mode()))
 			if errCreate != nil {
@@ -556,6 +562,39 @@ func extractAgentArchive(reader io.Reader, destination string, maxEntries int, m
 		return "", fatal("agent_archive_invalid", fmt.Errorf("the Cursor package does not contain an agent binary"))
 	}
 	return binary, nil
+}
+
+// ensureArchiveDirectory creates a relative archive directory one segment at a
+// time and rejects pre-existing symlinks before any archive file is opened.
+func ensureArchiveDirectory(root, relative string) error {
+	directory := filepath.Clean(root)
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return fatal("agent_archive_invalid", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fatal("agent_archive_unsafe", fmt.Errorf("archive extraction directory is unsafe"))
+	}
+	for _, segment := range strings.Split(relative, string(filepath.Separator)) {
+		if segment == "." || segment == "" {
+			continue
+		}
+		directory = filepath.Join(directory, segment)
+		info, err = os.Lstat(directory)
+		if os.IsNotExist(err) {
+			if err = os.Mkdir(directory, 0o700); err != nil {
+				return fatal("agent_archive_invalid", err)
+			}
+			continue
+		}
+		if err != nil {
+			return fatal("agent_archive_invalid", err)
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fatal("agent_archive_unsafe", fmt.Errorf("archive entry has a non-directory parent"))
+		}
+	}
+	return nil
 }
 
 func safeArchivePath(name string) (string, error) {

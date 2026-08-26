@@ -462,6 +462,22 @@ func TestInstallerRefusesHostileArchives(t *testing.T) {
 	}
 }
 
+func TestExtractAgentArchiveRejectsAPreexistingSymlinkParent(t *testing.T) {
+	destination := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(destination, "agent-cli-package")); err != nil {
+		t.Fatal(err)
+	}
+	archive := validAgentArchive(t, PinnedAgentVersion())
+	_, err := extractAgentArchive(bytes.NewReader(archive), destination, 16, 1<<20)
+	if FailureCode(err) != "agent_archive_unsafe" {
+		t.Fatalf("preexisting symlink parent error = %#v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, AgentExecutableName)); !os.IsNotExist(err) {
+		t.Fatalf("archive entry escaped through the symlink parent: %v", err)
+	}
+}
+
 func TestInstallerBoundsArchiveEntriesAndExpandedSize(t *testing.T) {
 	entries := []archiveEntry{agentEntry(PinnedAgentVersion())}
 	for index := 0; index < 20; index++ {
