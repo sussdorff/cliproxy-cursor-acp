@@ -5,6 +5,7 @@
 .beads-credential-key
 .beads/proxieddb/
 build/
+dist/
 
 # BEGIN Library-managed project installs
 /.library.lock.lock

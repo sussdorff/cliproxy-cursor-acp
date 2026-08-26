@@ -1,0 +1,100 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  attestations: write
+  id-token: write
+
+env:
+  # golang:1.26.0. Bump this digest together with the go directive in go.mod.
+  # Resolve a new one with:
+  #   docker buildx imagetools inspect golang:<version> --format '{{.Manifest.Digest}}'
+  GOLANG_IMAGE: golang@sha256:fb612b7831d53a89cbc0aaa7855b69ad7b0caf603715860cf538df854d047b84
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve versions
+        id: versions
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          GO_VERSION="$(awk '/^go /{print $2; exit}' go.mod)"
+          REGISTRY_VERSION="$(awk -F'"' '/"version"/{print $4; exit}' plugin-store/registry.json)"
+          if test "$VERSION" != "$REGISTRY_VERSION"; then
+            echo "tag version $VERSION does not match plugin-store/registry.json version $REGISTRY_VERSION" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >>"$GITHUB_OUTPUT"
+          echo "go_version=$GO_VERSION" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.versions.outputs.go_version }}
+
+      - name: Test
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test ./...
+          go test -race ./...
+
+      - name: Verify the embedded Cursor Agent digests against upstream
+        env:
+          CCA_VERIFY_UPSTREAM_DIGESTS: "1"
+        run: go test -count=1 -timeout 40m -run TestPinnedAgentDigestsMatchUpstream -v ./internal/cursor/
+
+      - name: Build linux/amd64 shared library
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          docker run --rm \
+            -v "$PWD":/src \
+            -w /src \
+            -e CGO_ENABLED=1 \
+            -e GOOS=linux \
+            -e GOARCH=amd64 \
+            -e GOFLAGS=-buildvcs=false \
+            "$GOLANG_IMAGE" \
+            go build -buildmode=c-shared -trimpath -o build/cliproxy-cursor-acp.so ./cmd/cliproxy-cursor-acp
+          test -f build/cliproxy-cursor-acp.so
+
+      - name: Package release assets
+        env:
+          VERSION: ${{ steps.versions.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist
+          cp build/cliproxy-cursor-acp.so dist/cliproxy-cursor-acp.so
+          (cd dist && zip -X -j "cliproxy-cursor-acp_${VERSION}_linux_amd64.zip" cliproxy-cursor-acp.so)
+          rm dist/cliproxy-cursor-acp.so
+          (cd dist && sha256sum "cliproxy-cursor-acp_${VERSION}_linux_amd64.zip" >checksums.txt)
+          (cd dist && unzip -l "cliproxy-cursor-acp_${VERSION}_linux_amd64.zip")
+          test -f "dist/cliproxy-cursor-acp_${VERSION}_linux_amd64.zip"
+          test -f dist/checksums.txt
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/cliproxy-cursor-acp_${{ steps.versions.outputs.version }}_linux_amd64.zip
+
+      - name: Publish GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.versions.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "cliproxy-cursor-acp $VERSION for CLIProxyAPI plugin stores." \
+            "dist/cliproxy-cursor-acp_${VERSION}_linux_amd64.zip" \
+            dist/checksums.txt

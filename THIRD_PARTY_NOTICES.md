@@ -21,6 +21,20 @@ The native plugin ABI and plugin API types depend on CLIProxyAPI v7.2.141.
 CLIProxyAPI is MIT licensed. Its exact upstream MIT text and copyright notice
 are included in [LICENSES/CLIProxyAPI-v7.2.141-MIT.txt](LICENSES/CLIProxyAPI-v7.2.141-MIT.txt).
 
+## nyanjou/cliproxyapi-cursor-plugin
+
+The managed Cursor Agent CLI installer in `internal/cursor/install.go` adapts the
+approach and the two artifact-URL regular expressions published by the
+MIT-licensed
+[`nyanjou/cliproxyapi-cursor-plugin`](https://github.com/nyanjou/cliproxyapi-cursor-plugin):
+strict parsing of `https://cursor.com/install` without executing it, a download
+host allowlist, bounded downloads, safe tar extraction, `--version` verification,
+and atomic activation. Its published v0.4.1 history is also the source of the
+requirement to capture `agent login` output in files rather than inherited pipes,
+because Cursor keeps a detached worker holding those descriptors. That project is
+distributed under the MIT License; its terms remain applicable to the material
+adapted from it and do not change the MIT license of this repository.
+
 ## gopkg.in/yaml.v3 v3.0.1
 
 The YAML parser is dual licensed as shipped upstream: selected libyaml-derived

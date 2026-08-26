@@ -17,7 +17,10 @@ import (
 // CommandFactory starts only the official `agent acp` stdio protocol. It does
 // not use a shell, private Cursor endpoints, or Cursor credential files.
 type CommandFactory struct {
+	// Executable pins the official CLI path. Resolve is used instead when set,
+	// because a managed install can appear after the plugin is configured.
 	Executable string
+	Resolve    func() (string, error)
 	BaseEnv    []string
 	// Arguments is test-only when non-empty. Production uses exactly "acp".
 	Arguments        []string
@@ -35,6 +38,16 @@ type ProfileProber interface {
 	Probe(context.Context, Account) (bool, error)
 }
 
+func (f CommandFactory) executable() (string, error) {
+	if f.Executable != "" {
+		return f.Executable, nil
+	}
+	if f.Resolve == nil {
+		return "", ValidationFailure(CodeSetupRequired, "the official Cursor Agent CLI is not installed")
+	}
+	return f.Resolve()
+}
+
 func (f CommandFactory) Probe(ctx context.Context, account Account) (bool, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -42,7 +55,11 @@ func (f CommandFactory) Probe(ctx context.Context, account Account) (bool, error
 	if len(arguments) == 0 {
 		arguments = []string{"models"}
 	}
-	command := exec.Command(f.Executable, arguments...)
+	executable, err := f.executable()
+	if err != nil {
+		return false, err
+	}
+	command := exec.Command(executable, arguments...)
 	command.Env = append(isolatedEnv(f.BaseEnv, account.ProfileDir), f.ProbeEnvironment...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, err := command.StdoutPipe()
@@ -56,6 +73,10 @@ func (f CommandFactory) Probe(ctx context.Context, account Account) (bool, error
 	if err := command.Start(); err != nil {
 		return false, err
 	}
+	// Cursor can leave a detached worker in the child's group. Reap it on every
+	// exit path, not only on timeout, so probes cannot accumulate orphans.
+	pgid := command.Process.Pid
+	defer terminateRemainingGroup(pgid)
 	var out, diagnostics boundedBuffer
 	var read sync.WaitGroup
 	read.Add(2)
@@ -110,15 +131,42 @@ func terminateProcessGroup(command *exec.Cmd) {
 	_ = syscall.Kill(-command.Process.Pid, syscall.SIGTERM)
 }
 
+// acpArguments builds the ACP argv. The model is passed as a single
+// "--model=<value>" token so a stored model can never be read as a separate
+// flag, on top of the validation Account.validate already applies.
+func acpArguments(configured []string, model string) []string {
+	if len(configured) > 0 {
+		return configured
+	}
+	arguments := []string{"acp"}
+	if model != "" {
+		arguments = append(arguments, "--model="+model)
+	}
+	return arguments
+}
+
+// terminateRemainingGroup kills whatever is left of a child's process group
+// after the group leader was already reaped, which is where Cursor leaves its
+// detached worker. Signalling an empty group is unsafe because the kernel may
+// have recycled the id, so the group's existence is probed with signal 0 first
+// and the group is left alone when it is already gone.
+func terminateRemainingGroup(pgid int) {
+	if pgid <= 0 {
+		return
+	}
+	if err := syscall.Kill(-pgid, syscall.Signal(0)); err != nil {
+		return
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+}
+
 func (f CommandFactory) Start(ctx context.Context, account Account) (ACPClient, error) {
-	arguments := f.Arguments
-	if len(arguments) == 0 {
-		arguments = []string{"acp"}
+	arguments := acpArguments(f.Arguments, account.Model)
+	executable, err := f.executable()
+	if err != nil {
+		return nil, err
 	}
-	if len(f.Arguments) == 0 && account.Model != "" {
-		arguments = append(arguments, "--model", account.Model)
-	}
-	command := exec.Command(f.Executable, arguments...)
+	command := exec.Command(executable, arguments...)
 	command.Env = append(isolatedEnv(f.BaseEnv, account.ProfileDir), f.TestEnvironment...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := command.StdinPipe()

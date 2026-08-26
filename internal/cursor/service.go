@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -40,14 +42,15 @@ type accountRuntime struct {
 
 // Service keeps every ACP process and ACP session inside the selected AuthID.
 // It intentionally has no account-selection algorithm: CLIProxyAPI owns that.
+// Accounts arrive at runtime from login completion and stored auth records.
 type Service struct {
 	mu               sync.Mutex
 	accounts         map[string]*accountRuntime
 	conversationAuth map[string]string
 	factory          Factory
+	paths            *Paths
 	sem              chan struct{}
 	maxPromptBytes   int
-	workspaceRoot    string
 	timeout          time.Duration
 }
 
@@ -64,7 +67,7 @@ type ACPClient interface {
 	Close() error
 }
 
-func NewService(config Config, factory Factory) (*Service, error) {
+func NewService(config Config, paths *Paths, factory Factory) (*Service, error) {
 	var err error
 	config, err = NormalizeConfig(config)
 	if err != nil {
@@ -73,12 +76,105 @@ func NewService(config Config, factory Factory) (*Service, error) {
 	if factory == nil {
 		return nil, fmt.Errorf("ACP factory is required")
 	}
-	accounts := make(map[string]*accountRuntime, len(config.Accounts))
-	for _, account := range config.Accounts {
-		accounts[account.AuthID] = &accountRuntime{account: account, sessions: make(map[string]string), turn: make(chan struct{}, 1)}
+	if paths == nil {
+		return nil, fmt.Errorf("plugin paths are required")
 	}
-	return &Service{accounts: accounts, conversationAuth: make(map[string]string), factory: factory, sem: make(chan struct{}, config.MaxConcurrent), maxPromptBytes: config.MaxPromptBytes, workspaceRoot: config.WorkspaceRoot, timeout: config.Timeout}, nil
+	return &Service{accounts: make(map[string]*accountRuntime), conversationAuth: make(map[string]string), factory: factory, paths: paths, sem: make(chan struct{}, config.MaxConcurrent), maxPromptBytes: config.MaxPromptBytes, timeout: config.Timeout}, nil
 }
+
+// RegisterAccount adds or replaces one runtime account. Registration is the
+// only way an AuthID becomes executable. The profile directory must be private,
+// owned by the service user, and a direct child of the managed profiles root:
+// a stored auth record must never be able to aim the official CLI at the host
+// auth directory or any other path the plugin does not own.
+func (s *Service) RegisterAccount(account Account) (Account, error) {
+	if strings.TrimSpace(account.Model) == "" {
+		account.Model = DefaultModel
+	}
+	if err := account.validate(); err != nil {
+		return Account{}, fatal("invalid_account", err)
+	}
+	profile, err := s.managedProfileDir(account.ProfileDir)
+	if err != nil {
+		return Account{}, fatal("invalid_profile", fmt.Errorf("cursor account %q profile directory: %w", account.AuthID, err))
+	}
+	account.ProfileDir = profile
+	s.mu.Lock()
+	for authID, runtime := range s.accounts {
+		if authID != account.AuthID && runtime.account.ProfileDir == profile {
+			s.mu.Unlock()
+			return Account{}, fatal("profile_conflict", fmt.Errorf("cursor account %q already owns that profile directory", authID))
+		}
+	}
+	existing := s.accounts[account.AuthID]
+	if existing != nil && existing.account.ProfileDir == profile {
+		existing.account = account
+		s.mu.Unlock()
+		return account, nil
+	}
+	var stale ACPClient
+	replaced := ""
+	if existing != nil {
+		stale = existing.client
+		replaced = existing.account.ProfileDir
+	}
+	s.accounts[account.AuthID] = &accountRuntime{account: account, sessions: make(map[string]string), turn: make(chan struct{}, 1)}
+	s.mu.Unlock()
+	if stale != nil {
+		_ = stale.Close()
+	}
+	// Re-authenticating one Cursor account moves it to a new profile. The old
+	// profile still holds live credential material, so it is removed once its
+	// process is gone. Only managed paths are ever deleted.
+	if replaced != "" && replaced != profile {
+		if _, err = s.managedProfileDir(replaced); err == nil {
+			_ = os.RemoveAll(replaced)
+		}
+	}
+	return account, nil
+}
+
+// managedProfileDir canonicalizes a profile directory and requires it to be a
+// direct child of the managed profiles root.
+func (s *Service) managedProfileDir(path string) (string, error) {
+	profile, err := secureDirectory(path)
+	if err != nil {
+		return "", err
+	}
+	profiles, err := s.paths.ProfilesRoot()
+	if err != nil {
+		return "", err
+	}
+	if filepath.Dir(profile) != profiles {
+		return "", fmt.Errorf("must be a directory created by the plugin login flow under %s", profiles)
+	}
+	return profile, nil
+}
+
+// Account returns the registered account for a host-selected AuthID.
+func (s *Service) Account(authID string) (Account, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	runtime := s.accounts[authID]
+	if runtime == nil {
+		return Account{}, false
+	}
+	return runtime.account, true
+}
+
+// Accounts returns every registered account.
+func (s *Service) Accounts() []Account {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	accounts := make([]Account, 0, len(s.accounts))
+	for _, runtime := range s.accounts {
+		accounts = append(accounts, runtime.account)
+	}
+	return accounts
+}
+
+// Workspace returns the working directory offered to every ACP child process.
+func (s *Service) Workspace() (string, error) { return s.paths.Workspace() }
 
 // Execute starts or reuses the ACP session for exactly the selected AuthID.
 func (s *Service) Execute(ctx context.Context, request Request) (Result, error) {
@@ -91,11 +187,15 @@ func (s *Service) Execute(ctx context.Context, request Request) (Result, error) 
 	if len(request.Prompt) > s.maxPromptBytes {
 		return Result{}, fatal("prompt_too_large", fmt.Errorf("prompt exceeds configured maximum"))
 	}
-	if request.WorkingDir == "" {
-		request.WorkingDir = s.workspaceRoot
+	workspaceRoot, err := s.paths.Workspace()
+	if err != nil {
+		return Result{}, err
 	}
-	if request.WorkingDir != s.workspaceRoot {
-		return Result{}, fatal("invalid_working_directory", fmt.Errorf("working directory must be configured workspace root"))
+	if request.WorkingDir == "" {
+		request.WorkingDir = workspaceRoot
+	}
+	if request.WorkingDir != workspaceRoot {
+		return Result{}, fatal("invalid_working_directory", fmt.Errorf("working directory must be the plugin workspace root"))
 	}
 	s.mu.Lock()
 	runtime := s.accounts[request.AuthID]

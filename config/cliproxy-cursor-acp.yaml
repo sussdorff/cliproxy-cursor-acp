@@ -1,16 +1,37 @@
-# Place this mapping under plugins.configs.cliproxy-cursor-acp in CLIProxyAPI.
-executable: /usr/local/bin/agent
+# Optional. Place this mapping under plugins.configs.cliproxy-cursor-acp in the
+# CLIProxyAPI configuration. Every key has a working default, so a plugin
+# installed from a plugin store needs no configuration at all.
+
+# Absolute path to the official Cursor Agent CLI. Leave unset to let the plugin
+# use its own digest-verified managed install first and `agent` from PATH after.
+# executable: /usr/local/bin/agent
+
+# Persistent directory for login profiles, the workspace, and the managed
+# Cursor Agent CLI. Defaults to <CLIProxyAPI auth dir>/cliproxy-cursor-acp.
+# In Docker this must be on a persistent volume.
+# data_root: /srv/cliproxy-cursor-acp
+
+# Which official Cursor Agent CLI the managed installer trusts.
+#   pinned (default): the release-pinned version whose sha256 is embedded in
+#                     this plugin build.
+#   latest:           parse cursor.com/install for Cursor's current release.
+#                     This is an explicit override and REQUIRES
+#                     agent_package_sha256, because this build has no
+#                     trustworthy digest for that artifact.
+# agent_install_source: pinned
+
+# sha256 of the official Cursor Agent package. Optional with the pinned source
+# (it then replaces the embedded digest); mandatory with the latest source.
+# Verify it yourself, for example:
+#   curl -sL https://downloads.cursor.com/lab/<version>/linux/x64/agent-cli-package.tar.gz | shasum -a 256
+# agent_package_sha256: ""
+
+# Working directory offered to the Cursor Agent. Must be an absolute, private
+# (mode 0700) directory owned by the service user. Defaults to
+# <data_root>/workspace.
+# workspace_root: /srv/cliproxy-cursor-acp/workspace
+
 max_concurrent: 2
 max_prompt_bytes: 524288
 max_output_bytes: 1048576
 timeout: 2m
-workspace_root: /srv/cliproxy-cursor-acp/workspace
-accounts:
-  - auth_id: cursor-personal
-    label: Personal Cursor subscription
-    profile_dir: /srv/cursor-profiles/cursor-personal
-    model: auto
-  - auth_id: cursor-work
-    label: Work Cursor subscription
-    profile_dir: /srv/cursor-profiles/cursor-work
-    model: auto
