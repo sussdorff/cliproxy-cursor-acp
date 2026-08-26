@@ -8,6 +8,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/sussdorff/cliproxy-cursor-acp/internal/cursor"
 )
 
 func TestABIBounds(t *testing.T) {
@@ -85,6 +86,23 @@ func TestConfigureAcceptsAnOperatorConfigurationWithoutAccounts(t *testing.T) {
 	}
 	if envelope.Error == nil || envelope.Error.HTTPStatus != 400 {
 		t.Fatalf("validation envelope = %s", raw)
+	}
+	if envelope.Error.Message != "Cursor request was rejected (invalid_request)" {
+		t.Fatalf("validation message = %q", envelope.Error.Message)
+	}
+	if strings.Contains(envelope.Error.Message, "OpenAI request requires text content") {
+		t.Fatalf("validation message leaked internal detail: %q", envelope.Error.Message)
+	}
+}
+
+func TestPublicErrorIncludesFailureCodeWithoutFailureDetail(t *testing.T) {
+	const detail = "credential=secret-value path=/private/profile"
+	code, message, status, retry := publicError(cursor.ValidationFailure("model_mismatch", detail))
+	if code != "model_mismatch" || message != "Cursor request was rejected (model_mismatch)" || status != 400 || retry {
+		t.Fatalf("public error = %q, %q, %d, %t", code, message, status, retry)
+	}
+	if strings.Contains(message, detail) || strings.Contains(message, "secret-value") || strings.Contains(message, "/private/profile") {
+		t.Fatalf("public message leaked failure detail: %q", message)
 	}
 }
 

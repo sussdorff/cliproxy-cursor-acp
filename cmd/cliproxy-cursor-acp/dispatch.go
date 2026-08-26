@@ -99,7 +99,7 @@ func publicError(err error) (string, string, int, bool) {
 		if failure.Kind == cursor.FailureRetryable {
 			return failure.Code, "Cursor account is temporarily unavailable", http.StatusBadGateway, true
 		}
-		return failure.Code, "Cursor request was rejected", http.StatusBadRequest, false
+		return failure.Code, fmt.Sprintf("Cursor request was rejected (%s)", failure.Code), http.StatusBadRequest, false
 	}
 	return "cursor_acp_error", "Cursor plugin request failed", http.StatusBadGateway, false
 }
