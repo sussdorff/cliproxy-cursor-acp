@@ -1,0 +1,25 @@
+{
+  "schema": "cliproxy.plugin.quota",
+  "version": 1,
+  "provider": "cursor-acp",
+  "availability": "available",
+  "observed_at": "2026-08-26T09:15:00Z",
+  "ttl_seconds": 900,
+  "windows": [
+    {
+      "id": "subscription",
+      "label": "Monthly usage",
+      "kind": "monthly",
+      "unit": "requests",
+      "used": 125,
+      "limit": 500,
+      "remaining": 375,
+      "used_percent": 25,
+      "unlimited": false,
+      "window_start": "2026-08-01T00:00:00Z",
+      "window_end": "2026-09-01T00:00:00Z",
+      "reset_at": "2026-09-01T00:00:00Z",
+      "reset_accuracy": "exact"
+    }
+  ]
+}

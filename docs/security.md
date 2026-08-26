@@ -242,10 +242,22 @@ the release if the embedded Cursor Agent digests no longer match upstream.
 
 ## Management data
 
-The plugin emits only account label, selected model, availability, and observed
-ACP token counters. It does not return tokens, cookies, raw child output, or
-numeric subscription balances. `exact_subscription_quota` is null and
-`subscription_quota_available` is false by design.
+The plugin emits only account label, selected model, availability, observed ACP
+token counters, and the account-scoped subscription quota contract described in
+[docs/plugin-quota-contract.md](plugin-quota-contract.md). It does not return
+tokens, cookies, profile paths, raw child output, or raw upstream response
+bodies.
+
+The quota observation reads the managed profile's access token in memory only,
+to derive a session cookie for Cursor's production usage-summary endpoint. That
+token is never copied into management metadata. Every published boundary is
+re-serialized as RFC3339 UTC and every provider-supplied label is bounded and
+stripped of control characters, so no upstream text reaches a manager UI
+verbatim.
+
+Quota availability is reported independently of credential availability. An
+unobservable, stale, or malformed quota can never disable an account or remove
+it from CLIProxyAPI's rotation.
 
 ## Operational review
 

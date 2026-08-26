@@ -52,6 +52,7 @@ type Service struct {
 	sem              chan struct{}
 	maxPromptBytes   int
 	timeout          time.Duration
+	quota            QuotaProvider
 }
 
 // Factory starts a new ACP peer using the selected account only.
@@ -67,7 +68,15 @@ type ACPClient interface {
 	Close() error
 }
 
-func NewService(config Config, paths *Paths, factory Factory) (*Service, error) {
+// ServiceOption adjusts one collaborator after the service is constructed.
+type ServiceOption func(*Service)
+
+// WithQuotaProvider replaces the production quota client for hermetic tests.
+func WithQuotaProvider(provider QuotaProvider) ServiceOption {
+	return func(service *Service) { service.quota = provider }
+}
+
+func NewService(config Config, paths *Paths, factory Factory, options ...ServiceOption) (*Service, error) {
 	var err error
 	config, err = NormalizeConfig(config)
 	if err != nil {
@@ -79,7 +88,13 @@ func NewService(config Config, paths *Paths, factory Factory) (*Service, error) 
 	if paths == nil {
 		return nil, fmt.Errorf("plugin paths are required")
 	}
-	return &Service{accounts: make(map[string]*accountRuntime), conversationAuth: make(map[string]string), factory: factory, paths: paths, sem: make(chan struct{}, config.MaxConcurrent), maxPromptBytes: config.MaxPromptBytes, timeout: config.Timeout}, nil
+	service := &Service{accounts: make(map[string]*accountRuntime), conversationAuth: make(map[string]string), factory: factory, paths: paths, sem: make(chan struct{}, config.MaxConcurrent), maxPromptBytes: config.MaxPromptBytes, timeout: config.Timeout, quota: NewUsageSummaryClient()}
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+	return service, nil
 }
 
 // RegisterAccount adds or replaces one runtime account. Registration is the
