@@ -168,6 +168,10 @@ account identity and its profile directory path. Repeat for every Cursor account
 you want to add. A failed or expired login leaves no partial account and removes
 its profile directory.
 
+Before starting the next login, sign out of `cursor.com` in the approval browser
+or use a fresh private browser profile. Otherwise Cursor may approve the account
+that is already signed in instead of the additional account you intended.
+
 If no Cursor CLI is resolvable, the login card reports a setup-required state and
 links the setup page from step 3 instead of failing opaquely.
 

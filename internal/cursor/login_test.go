@@ -134,6 +134,31 @@ func testLogin(t *testing.T, behaviour string) *Login {
 	}
 }
 
+// TestRegressionCursorAuthUsesPerProfileXDGConfigHome guards the live failure
+// where Cursor stored auth in the container-global XDG config directory even
+// though CURSOR_CONFIG_DIR was unique for every account.
+func TestRegressionCursorAuthUsesPerProfileXDGConfigHome(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "profile")
+	for name, environment := range map[string][]string{
+		"acp":   isolatedEnv([]string{"HOME=/root", "XDG_CONFIG_HOME=/root/.config"}, profile),
+		"login": loginEnv([]string{"HOME=/root", "XDG_CONFIG_HOME=/root/.config"}, profile),
+	} {
+		values := make(map[string]string)
+		for _, entry := range environment {
+			key, value, ok := strings.Cut(entry, "=")
+			if ok {
+				values[key] = value
+			}
+		}
+		if values["CURSOR_CONFIG_DIR"] != profile {
+			t.Fatalf("%s CURSOR_CONFIG_DIR = %q, want %q", name, values["CURSOR_CONFIG_DIR"], profile)
+		}
+		if values["XDG_CONFIG_HOME"] != profile {
+			t.Fatalf("%s XDG_CONFIG_HOME = %q, want %q", name, values["XDG_CONFIG_HOME"], profile)
+		}
+	}
+}
+
 func waitForLogin(t *testing.T, login *Login, state string) LoginResult {
 	t.Helper()
 	deadline := time.Now().Add(8 * time.Second)
