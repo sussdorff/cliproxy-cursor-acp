@@ -246,7 +246,10 @@ func (a *Adapter) restoreAccountFromStorage(authID string, storageJSON []byte) (
 	if err := json.Unmarshal(storageJSON, &stored); err != nil {
 		return cursor.Account{}, cursor.ErrUnknownAuth
 	}
-	if strings.TrimSpace(authID) == "" || strings.TrimSpace(stored.AuthID) != authID || strings.TrimSpace(stored.ProfileDir) == "" {
+	if strings.TrimSpace(authID) == "" || strings.TrimSpace(stored.AuthID) == "" || strings.TrimSpace(stored.ProfileDir) == "" {
+		return cursor.Account{}, cursor.ErrUnknownAuth
+	}
+	if stored.AuthID != authID {
 		return cursor.Account{}, cursor.ErrUnknownAuth
 	}
 	return a.service.RestoreAccountIfAbsent(accountFromStored(stored))

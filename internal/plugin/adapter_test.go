@@ -378,6 +378,29 @@ func TestFirstHostRequestRejectsStorageForAnotherAuthID(t *testing.T) {
 	}
 }
 
+func TestFirstHostRequestRejectsWhitespacePaddedStoredAuthID(t *testing.T) {
+	origin := newHarness(t, writeFakeAgent(t))
+	auth := completeLogin(t, origin.adapter)
+	var stored storedAuth
+	if err := json.Unmarshal(auth.StorageJSON, &stored); err != nil {
+		t.Fatal(err)
+	}
+	stored.AuthID = " " + auth.ID + " "
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := newHarnessAt(t, writeFakeAgent(t), origin.dataRoot)
+
+	_, err = restarted.adapter.ModelsForAuth(context.Background(), pluginapi.AuthModelRequest{AuthID: auth.ID, StorageJSON: raw})
+	if !errors.Is(err, cursor.ErrUnknownAuth) {
+		t.Fatalf("ModelsForAuth() error = %v, want unknown auth", err)
+	}
+	if _, ok := restarted.service.Account(auth.ID); ok {
+		t.Fatal("whitespace-padded storage registered the requested AuthID")
+	}
+}
+
 func TestParseAuthDoesNotReplaceCurrentAccountWithStaleStoredProfile(t *testing.T) {
 	harness := newHarness(t, writeFakeAgent(t))
 	currentAuth := completeLogin(t, harness.adapter)
