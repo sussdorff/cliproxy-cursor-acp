@@ -16,7 +16,7 @@ import (
 	"github.com/sussdorff/cliproxy-cursor-acp/internal/cursor"
 )
 
-const Version = "0.2.0"
+const Version = "0.2.2"
 
 // Options collects the collaborators an adapter needs. Every account is created
 // at runtime by the login flow or reconstructed from a stored auth record.
