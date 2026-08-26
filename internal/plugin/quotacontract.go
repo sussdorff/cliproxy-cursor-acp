@@ -100,6 +100,9 @@ func buildPluginQuotaContract(providerID string, metadata cursor.Metadata) plugi
 // subscriptionWindow maps the Cursor billing-cycle observation onto the single
 // generic window this provider can describe.
 func subscriptionWindow(quota cursor.Quota) (pluginQuotaWindow, bool) {
+	if quota.Used < 0 || quota.Limit < 0 || quota.Remaining < 0 {
+		return pluginQuotaWindow{}, false
+	}
 	limitType := displayText(quota.LimitType)
 	windowStart := contractTimestamp(quota.WindowStart)
 	windowEnd := contractTimestamp(quota.WindowEnd)

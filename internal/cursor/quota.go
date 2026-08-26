@@ -191,7 +191,9 @@ func parseUsageSummary(body []byte) (Quota, bool) {
 		return Quota{}, false
 	}
 	plan := summary.IndividualUsage.Plan
-	if !plan.Enabled || !plan.Used.set || !plan.Limit.set || !plan.Remaining.set || strings.TrimSpace(summary.BillingCycleStart) == "" || strings.TrimSpace(summary.BillingCycleEnd) == "" {
+	if !plan.Enabled || !plan.Used.set || !plan.Limit.set || !plan.Remaining.set ||
+		plan.Used.value < 0 || plan.Limit.value < 0 || plan.Remaining.value < 0 ||
+		strings.TrimSpace(summary.BillingCycleStart) == "" || strings.TrimSpace(summary.BillingCycleEnd) == "" {
 		return Quota{}, false
 	}
 	return Quota{

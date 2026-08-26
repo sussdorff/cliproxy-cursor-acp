@@ -1049,6 +1049,9 @@ func TestPartiallyPopulatedObservationsStayBounded(t *testing.T) {
 	for name, observation := range map[string]cursor.Quota{
 		"unparseable boundaries": {Available: true, WindowStart: "soon", WindowEnd: "later", Used: 1, Limit: 10, Remaining: 9},
 		"absent boundaries":      {Available: true, Used: 1, Limit: 10, Remaining: 9},
+		"negative used":          {Available: true, WindowStart: "2026-08-01T00:00:00Z", WindowEnd: "2026-09-01T00:00:00Z", Used: -1, Limit: 10, Remaining: 9},
+		"negative limit":         {Available: true, WindowStart: "2026-08-01T00:00:00Z", WindowEnd: "2026-09-01T00:00:00Z", Used: 1, Limit: -10, Remaining: 9},
+		"negative remaining":     {Available: true, WindowStart: "2026-08-01T00:00:00Z", WindowEnd: "2026-09-01T00:00:00Z", Used: 1, Limit: 10, Remaining: -9},
 	} {
 		t.Run(name, func(t *testing.T) {
 			contract := buildPluginQuotaContract(cursor.ProviderID, cursor.Metadata{

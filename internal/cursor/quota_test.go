@@ -88,6 +88,25 @@ func TestUsageSummaryMapsCurrentBillingWindowWithoutLeakingCredentials(t *testin
 	}
 }
 
+func TestParseUsageSummaryRejectsNegativeCounts(t *testing.T) {
+	for name, counts := range map[string]string{
+		"used":      `"used":-1,"limit":500,"remaining":375`,
+		"limit":     `"used":125,"limit":-1,"remaining":375`,
+		"remaining": `"used":125,"limit":500,"remaining":-1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := []byte(`{
+				"billingCycleStart":"2026-08-01T00:00:00.000Z",
+				"billingCycleEnd":"2026-09-01T00:00:00.000Z",
+				"individualUsage":{"plan":{"enabled":true,` + counts + `}}
+			}`)
+			if _, ok := parseUsageSummary(body); ok {
+				t.Fatal("negative subscription count produced an available quota")
+			}
+		})
+	}
+}
+
 func TestUsageSummaryUnavailableFailuresNeverExposeCredentials(t *testing.T) {
 	cases := []struct {
 		name       string
