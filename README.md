@@ -63,7 +63,13 @@ plugins:
   dir: /root/.cli-proxy-api/plugins
   store-sources:
     - https://raw.githubusercontent.com/sussdorff/cliproxy-cursor-acp/main/plugin-store/registry.json
+  configs:
+    cliproxy-cursor-acp:
+      data_root: /root/.cli-proxy-api/cliproxy-cursor-acp
 ```
+
+Keep `data_root` inside a persistent volume and set it explicitly. The path
+above reuses CLIProxyAPI's usual Docker auth-volume mount.
 
 ### 2. Install the plugin from the CPAMP plugin store
 
@@ -82,8 +88,9 @@ The plugin does not ship Cursor's CLI. Open the plugin's setup page:
 https://<your-cliproxyapi-host>/v0/resource/plugins/cliproxy-cursor-acp/setup
 ```
 
-CPAMP also links this page from the plugin's resource menu. Enter your
-management key and press **Install official Cursor Agent CLI**. The install:
+CPAMP also links this page from the plugin's resource menu. Enter the
+**CLIProxyAPI management key** (not the separate CPAMP admin key) and press
+**Install official Cursor Agent CLI**. The install:
 
 - downloads a **release-pinned** Cursor Agent version over HTTPS from the
   canonical `https://downloads.cursor.com/lab/<version>/<os>/<arch>/agent-cli-package.tar.gz`
@@ -143,8 +150,8 @@ procedure is in [docs/security.md](docs/security.md).
 
 ### 4. Log in to a Cursor account
 
-Open **OAuth** in CPAMP. The **Cursor ACP** card is rendered automatically.
-Press **Start Cursor Login**:
+Open **OAuth Login** in CPAMP. The plugin card is rendered automatically as
+**cliproxy-cursor-acp**. Press **Start cliproxy-cursor-acp Login**:
 
 1. the plugin creates a fresh private profile directory (mode `0700`);
 2. it starts the official `agent login` inside that profile with
@@ -186,7 +193,7 @@ under `plugins.configs.cliproxy-cursor-acp` — see
 | Key | Default | Meaning |
 |---|---|---|
 | `executable` | unset | Absolute path to the official Cursor Agent CLI. When unset, the plugin uses its own digest-verified managed install first, then `agent` from `PATH`. |
-| `data_root` | `<CLIProxyAPI auth dir>/cliproxy-cursor-acp` | Persistent directory holding login profiles, the workspace, and the managed CLI. |
+| `data_root` | `<CLIProxyAPI auth dir>/cliproxy-cursor-acp` when the host exposes its auth directory | Persistent directory holding login profiles, the workspace, and the managed CLI. Set it explicitly for Docker deployments. |
 | `agent_install_source` | `pinned` | `pinned` installs the release-pinned Cursor Agent version verified against a digest embedded in this build. `latest` parses `cursor.com/install` and requires `agent_package_sha256`. |
 | `agent_package_sha256` | unset | sha256 of the official Cursor Agent package. Optional with `pinned` (replaces the embedded digest), mandatory with `latest`. |
 | `workspace_root` | `<data_root>/workspace` | Working directory offered to the Cursor Agent. Must be absolute, mode `0700`, owned by the service user. |
@@ -209,9 +216,8 @@ Two directories must survive container recreation:
   example `/root/.cli-proxy-api/plugins` when `/root/.cli-proxy-api` is already
   mounted, instead of adding a second mount.
 - **The plugin data root** (`data_root`). It holds every login profile and the
-  managed Cursor CLI. It defaults to a subdirectory of CLIProxyAPI's auth
-  directory, which is normally already persistent; set `data_root` explicitly if
-  yours is not.
+  managed Cursor CLI. Set it explicitly to a path inside a persistent mount; the
+  example above places it below CLIProxyAPI's usual auth-volume mount.
 
 If the data root is lost, the stored auth records still exist but their profile
 directories do not, and each account has to log in again.
