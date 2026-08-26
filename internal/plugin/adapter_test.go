@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -320,6 +321,83 @@ func TestParseAuthReconstructsAccountsAfterHostRestart(t *testing.T) {
 	}
 	if _, err := restarted.adapter.ModelsForAuth(context.Background(), pluginapi.AuthModelRequest{AuthID: "cursor-unknown"}); err == nil {
 		t.Fatal("model discovery accepted an unknown AuthID")
+	}
+}
+
+func TestLoginCreatedAccountRestoresFromHostStorageBeforeFirstModelOrExecutionRequest(t *testing.T) {
+	origin := newHarness(t, writeFakeAgent(t))
+	auth := completeLogin(t, origin.adapter)
+	payload, _ := json.Marshal(map[string]any{"messages": []map[string]string{{"role": "user", "content": "hello"}}})
+
+	// CLIProxyAPI can select a persisted AuthID before it sends the plugin its
+	// parse-auth callback. It carries the provider-owned storage on model and
+	// execution requests, so either first request must restore the account.
+	for name, firstRequest := range map[string]func(context.Context, *Adapter) error{
+		"models": func(ctx context.Context, adapter *Adapter) error {
+			models, err := adapter.ModelsForAuth(ctx, pluginapi.AuthModelRequest{AuthID: auth.ID, StorageJSON: auth.StorageJSON})
+			if err != nil {
+				return err
+			}
+			if len(models.Models) != 1 || models.Models[0].ID != cursor.DefaultModel {
+				return fmt.Errorf("models = %#v", models.Models)
+			}
+			return nil
+		},
+		"execute": func(ctx context.Context, adapter *Adapter) error {
+			_, err := adapter.Execute(ctx, pluginapi.ExecutorRequest{AuthID: auth.ID, Model: cursor.DefaultModel, StorageJSON: auth.StorageJSON, Payload: payload})
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			restarted := newHarnessAt(t, writeFakeAgent(t), origin.dataRoot)
+			if err := firstRequest(context.Background(), restarted.adapter); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := restarted.service.Account(auth.ID); !ok {
+				t.Fatal("first host request did not restore the selected account")
+			}
+			if name == "execute" && restarted.factory.profile(auth.ID) != mustProfileDir(t, auth) {
+				t.Fatalf("execution profile = %q, want recovered profile %q", restarted.factory.profile(auth.ID), mustProfileDir(t, auth))
+			}
+		})
+	}
+}
+
+func TestFirstHostRequestRejectsStorageForAnotherAuthID(t *testing.T) {
+	origin := newHarness(t, writeFakeAgent(t))
+	first := completeLogin(t, origin.adapter)
+	second := completeLogin(t, origin.adapter)
+	restarted := newHarnessAt(t, writeFakeAgent(t), origin.dataRoot)
+
+	_, err := restarted.adapter.ModelsForAuth(context.Background(), pluginapi.AuthModelRequest{AuthID: first.ID, StorageJSON: second.StorageJSON})
+	if !errors.Is(err, cursor.ErrUnknownAuth) {
+		t.Fatalf("ModelsForAuth() error = %v, want unknown auth", err)
+	}
+	if _, ok := restarted.service.Account(first.ID); ok {
+		t.Fatal("mismatched storage registered the requested AuthID")
+	}
+}
+
+func TestFirstHostRequestRejectsWhitespacePaddedStoredAuthID(t *testing.T) {
+	origin := newHarness(t, writeFakeAgent(t))
+	auth := completeLogin(t, origin.adapter)
+	var stored storedAuth
+	if err := json.Unmarshal(auth.StorageJSON, &stored); err != nil {
+		t.Fatal(err)
+	}
+	stored.AuthID = " " + auth.ID + " "
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := newHarnessAt(t, writeFakeAgent(t), origin.dataRoot)
+
+	_, err = restarted.adapter.ModelsForAuth(context.Background(), pluginapi.AuthModelRequest{AuthID: auth.ID, StorageJSON: raw})
+	if !errors.Is(err, cursor.ErrUnknownAuth) {
+		t.Fatalf("ModelsForAuth() error = %v, want unknown auth", err)
+	}
+	if _, ok := restarted.service.Account(auth.ID); ok {
+		t.Fatal("whitespace-padded storage registered the requested AuthID")
 	}
 }
 
