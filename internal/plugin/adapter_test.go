@@ -300,19 +300,22 @@ func TestParseAuthReconstructsAccountsAfterHostRestart(t *testing.T) {
 		if errModels != nil {
 			t.Fatal(errModels)
 		}
-		if len(models.Models) != 1 || models.Models[0].ID != "cursor/"+cursor.DefaultModel {
+		if len(models.Models) != 1 || models.Models[0].ID != cursor.DefaultModel {
 			t.Fatalf("models = %#v", models.Models)
 		}
 	}
 
 	payload, _ := json.Marshal(map[string]any{"messages": []map[string]string{{"role": "user", "content": "hello"}}})
-	if _, err := restarted.adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: second.ID, Model: "cursor/auto", Payload: payload}); err != nil {
+	if _, err := restarted.adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: second.ID, Model: cursor.DefaultModel, Payload: payload}); err != nil {
 		t.Fatal(err)
 	}
 	if got := restarted.factory.profile(second.ID); got != mustProfileDir(t, second) {
 		t.Fatalf("execution ran under %q, stored record names %q", got, mustProfileDir(t, second))
 	}
-	if _, err := restarted.adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: "cursor-unknown", Model: "cursor/auto", Payload: payload}); err == nil {
+	if _, err := restarted.adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: second.ID, Model: "unrelated", Payload: payload}); cursor.FailureCode(err) != "model_mismatch" {
+		t.Fatalf("unrelated model error = %v", err)
+	}
+	if _, err := restarted.adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: "cursor-unknown", Model: cursor.DefaultModel, Payload: payload}); err == nil {
 		t.Fatal("executor accepted an AuthID that was never parsed")
 	}
 	if _, err := restarted.adapter.ModelsForAuth(context.Background(), pluginapi.AuthModelRequest{AuthID: "cursor-unknown"}); err == nil {
