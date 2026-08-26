@@ -41,3 +41,13 @@ func fatal(code string, err error) error {
 // ValidationFailure denotes a client/configuration error that must be rendered
 // by the native ABI as a stable HTTP 400 rather than an upstream failure.
 func ValidationFailure(code, message string) error { return fatal(code, errors.New(message)) }
+
+// FailureCode returns the stable failure code of err, or the empty string when
+// err is not a plugin failure.
+func FailureCode(err error) string {
+	var failure *Failure
+	if errors.As(err, &failure) {
+		return failure.Code
+	}
+	return ""
+}

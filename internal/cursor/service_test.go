@@ -91,12 +91,18 @@ func testService(t *testing.T) (*Service, *fakeFactory) {
 		}
 	}
 	factory := &fakeFactory{}
-	service, err := NewService(Config{Executable: os.Args[0], MaxConcurrent: 2, MaxPromptBytes: 1024, Accounts: []Account{
-		{AuthID: "cursor-a", Label: "A", ProfileDir: profiles + "/a", Model: "auto"},
-		{AuthID: "cursor-b", Label: "B", ProfileDir: profiles + "/b", Model: "auto"},
-	}, MaxOutputBytes: 1024, WorkspaceRoot: workspace, Timeout: time.Second}, factory)
+	paths := NewPaths(root, workspace)
+	service, err := NewService(Config{Executable: os.Args[0], MaxConcurrent: 2, MaxPromptBytes: 1024, MaxOutputBytes: 1024, Timeout: time.Second}, paths, factory)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, account := range []Account{
+		{AuthID: "cursor-a", Label: "A", ProfileDir: profiles + "/a", Model: "auto"},
+		{AuthID: "cursor-b", Label: "B", ProfileDir: profiles + "/b", Model: "auto"},
+	} {
+		if _, errRegister := service.RegisterAccount(account); errRegister != nil {
+			t.Fatal(errRegister)
+		}
 	}
 	return service, factory
 }
