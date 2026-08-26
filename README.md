@@ -197,7 +197,7 @@ under `plugins.configs.cliproxy-cursor-acp` — see
 | Key | Default | Meaning |
 |---|---|---|
 | `executable` | unset | Absolute path to the official Cursor Agent CLI. When unset, the plugin uses its own digest-verified managed install first, then `agent` from `PATH`. |
-| `data_root` | `<CLIProxyAPI auth dir>/cliproxy-cursor-acp` when the host exposes its auth directory | Persistent directory holding login profiles, the workspace, and the managed CLI. Set it explicitly for Docker deployments. |
+| `data_root` | `<CLIProxyAPI auth dir>/cliproxy-cursor-acp` when the host exposes its auth directory; otherwise required | Persistent directory holding login profiles, the workspace, and the managed CLI. Set it explicitly for Docker deployments. |
 | `agent_install_source` | `pinned` | `pinned` installs the release-pinned Cursor Agent version verified against a digest embedded in this build. `latest` parses `cursor.com/install` and requires `agent_package_sha256`. |
 | `agent_package_sha256` | unset | sha256 of the official Cursor Agent package. Optional with `pinned` (replaces the embedded digest), mandatory with `latest`. |
 | `workspace_root` | `<data_root>/workspace` | Working directory offered to the Cursor Agent. Must be absolute, mode `0700`, owned by the service user. |
