@@ -5,3 +5,26 @@
 .beads-credential-key
 .beads/proxieddb/
 build/
+
+# BEGIN Library-managed project installs
+/.library.lock.lock
+/.library.lock.workspace-journal.json
+/.library.lock.workspace-lock
+/.library.lock.workspace-rollback
+/.agents/skills/cmux-browser
+/.agents/skills/cmux-browser/SKILL.md
+/.agents/skills/cmux-browser/agents
+/.agents/skills/cmux-browser/agents/openai.yaml
+/.agents/skills/cmux-browser/references
+/.agents/skills/cmux-browser/references/authentication.md
+/.agents/skills/cmux-browser/references/commands.md
+/.agents/skills/cmux-browser/references/proxy-support.md
+/.agents/skills/cmux-browser/references/session-management.md
+/.agents/skills/cmux-browser/references/snapshot-refs.md
+/.agents/skills/cmux-browser/references/video-recording.md
+/.agents/skills/cmux-browser/templates
+/.agents/skills/cmux-browser/templates/authenticated-session.sh
+/.agents/skills/cmux-browser/templates/capture-workflow.sh
+/.agents/skills/cmux-browser/templates/form-automation.sh
+/.claude/skills/cmux-browser
+# END Library-managed project installs

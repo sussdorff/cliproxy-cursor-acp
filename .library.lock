@@ -1,0 +1,100 @@
+schema_version: 2
+migration:
+  prune_ack_required: false
+requested_roots:
+- id: skill:cmux-browser
+  type: skill
+  name: cmux-browser
+  scope: project
+  catalog_identity: https://github.com/manaflow-ai/cmux
+  resolved_version: legacy
+  definition_commit: 1f756695806b77ae918ed58381f8d49c6e9f9852
+receipts:
+- name: cmux-browser
+  type: skill
+  marketplace: cmux-official
+  source: https://github.com/manaflow-ai/cmux/blob/main/skills/cmux-browser/SKILL.md
+  source_commit: 1f756695806b77ae918ed58381f8d49c6e9f9852
+  cache_path: /Users/malte/.local/share/library/skills/cmux-official/cmux-browser@1f756695806b77/
+  install_target: .agents/skills/cmux-browser/
+  install_timestamp: '2026-08-26T01:06:08Z'
+  checksum_sha256: 082fbd43f40cf9c8c0659618560a9f2e706cb29f1d86b7c616637e38368490b2
+  checksum_type: directory
+  content_sha256: 082fbd43f40cf9c8c0659618560a9f2e706cb29f1d86b7c616637e38368490b2
+  install_mode: vendor
+  license: unknown
+  bridge_symlinks:
+  - .claude/skills/cmux-browser -> ../../.agents/skills/cmux-browser
+  scope: project
+  catalog_identity: https://github.com/manaflow-ai/cmux
+  id: skill:cmux-browser
+  resolved_version: legacy
+  verified: true
+  adopted: false
+  prune_blocked_reason: null
+  targets:
+  - path: .agents/skills/cmux-browser
+    kind: directory
+  - path: .agents/skills/cmux-browser/SKILL.md
+    kind: file
+    content_sha256: 741d9941a3d6ecca81e3e019dd301ba9aa249881b2b39f0dff4087df4eb687e4
+  - path: .agents/skills/cmux-browser/agents
+    kind: directory
+  - path: .agents/skills/cmux-browser/agents/openai.yaml
+    kind: file
+    content_sha256: cdaa4e8dda292db314c5e5f5ab8975635be039b8876dfd9c41c098da302f59e5
+  - path: .agents/skills/cmux-browser/references
+    kind: directory
+  - path: .agents/skills/cmux-browser/references/authentication.md
+    kind: file
+    content_sha256: 34d0c263ed18aba911cb3c5ced4d80bf7f57f913939f3c4ea6e54b2e73c35a27
+  - path: .agents/skills/cmux-browser/references/commands.md
+    kind: file
+    content_sha256: 053e1d56b5bfe573ac08818678e5ea1a77f0729c28e6cc2f2f85ef42d3ac2324
+  - path: .agents/skills/cmux-browser/references/proxy-support.md
+    kind: file
+    content_sha256: 2831e02583d0698c8ad5719adfb98799e22cf6861a0e31a3b42bfeecba388084
+  - path: .agents/skills/cmux-browser/references/session-management.md
+    kind: file
+    content_sha256: bb6e1d30a1866a57e65735d17ad3b35f84ebae43aec5babc2ef6bed04c24b62b
+  - path: .agents/skills/cmux-browser/references/snapshot-refs.md
+    kind: file
+    content_sha256: ec3dcee16a90e6de2aa2e158800c88bc008396e6359f08f34c5e08fdcfe141c8
+  - path: .agents/skills/cmux-browser/references/video-recording.md
+    kind: file
+    content_sha256: fccf97301a66595e2bf2c57b0d11aaeffa999f7a9c5045f9c80fdd64e64ec23e
+  - path: .agents/skills/cmux-browser/templates
+    kind: directory
+  - path: .agents/skills/cmux-browser/templates/authenticated-session.sh
+    kind: file
+    content_sha256: 138ddd070519092f38b21c1e72206d901e726610d205a34e9a93bc3efb2888df
+  - path: .agents/skills/cmux-browser/templates/capture-workflow.sh
+    kind: file
+    content_sha256: 339d9de6320dfaae72534d36f0b7d5476b12a2ba9c95f0e2f74960e72cf49ca2
+  - path: .agents/skills/cmux-browser/templates/form-automation.sh
+    kind: file
+    content_sha256: 6ec05ca74e999688ea2455c1e4d11f37e426cee9604ece7b2cacfbdfe44a3506
+  - path: .claude/skills/cmux-browser
+    kind: symlink
+    link_target: ../../.agents/skills/cmux-browser
+  owners_cache:
+  - skill:cmux-browser
+prerequisites: []
+installed:
+- name: cmux-browser
+  type: skill
+  marketplace: cmux-official
+  source: https://github.com/manaflow-ai/cmux/blob/main/skills/cmux-browser/SKILL.md
+  source_commit: 1f756695806b77ae918ed58381f8d49c6e9f9852
+  cache_path: /Users/malte/.local/share/library/skills/cmux-official/cmux-browser@1f756695806b77/
+  install_target: .agents/skills/cmux-browser/
+  install_timestamp: '2026-08-26T01:06:08Z'
+  checksum_sha256: 082fbd43f40cf9c8c0659618560a9f2e706cb29f1d86b7c616637e38368490b2
+  checksum_type: directory
+  content_sha256: 082fbd43f40cf9c8c0659618560a9f2e706cb29f1d86b7c616637e38368490b2
+  install_mode: vendor
+  license: unknown
+  bridge_symlinks:
+  - .claude/skills/cmux-browser -> ../../.agents/skills/cmux-browser
+  scope: project
+  catalog_identity: https://github.com/manaflow-ai/cmux
