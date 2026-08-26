@@ -105,10 +105,7 @@ func (a *Adapter) ParseAuth(ctx context.Context, request pluginapi.AuthParseRequ
 	if strings.TrimSpace(stored.AuthID) == "" || strings.TrimSpace(stored.ProfileDir) == "" {
 		return pluginapi.AuthParseResponse{Handled: false}, nil
 	}
-	if account, ok := a.service.Account(stored.AuthID); ok {
-		return pluginapi.AuthParseResponse{Handled: true, Auth: a.authData(ctx, account)}, nil
-	}
-	account, err := a.service.RegisterAccount(accountFromStored(stored))
+	account, err := a.service.RestoreAccountIfAbsent(accountFromStored(stored))
 	if err != nil {
 		return pluginapi.AuthParseResponse{Handled: false}, nil
 	}
@@ -176,7 +173,7 @@ func (a *Adapter) RefreshAuth(ctx context.Context, request pluginapi.AuthRefresh
 		if err := json.Unmarshal(request.StorageJSON, &stored); err != nil || strings.TrimSpace(stored.ProfileDir) == "" {
 			return pluginapi.AuthRefreshResponse{}, cursor.ErrUnknownAuth
 		}
-		registered, err := a.service.RegisterAccount(accountFromStored(stored))
+		registered, err := a.service.RestoreAccountIfAbsent(accountFromStored(stored))
 		if err != nil {
 			return pluginapi.AuthRefreshResponse{}, err
 		}

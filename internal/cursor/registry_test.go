@@ -126,6 +126,73 @@ func TestRegisterAccountRemovesTheReplacedProfileOfTheSameAccount(t *testing.T) 
 	}
 }
 
+func TestRestoreAccountIfAbsentKeepsCurrentConcurrentRegistration(t *testing.T) {
+	service, _ := testService(t)
+	stale := managedProfile(t, service, "stale")
+	current := managedProfile(t, service, "current")
+	staleAccount := Account{AuthID: "cursor-same", Label: "stale", ProfileDir: stale}
+	currentAccount := Account{AuthID: "cursor-same", Label: "current", ProfileDir: current}
+
+	start := make(chan struct{})
+	failures := make(chan error, 2)
+	var group sync.WaitGroup
+	for _, register := range []func() error{
+		func() error {
+			_, err := service.RestoreAccountIfAbsent(staleAccount)
+			return err
+		},
+		func() error {
+			_, err := service.RegisterAccount(currentAccount)
+			return err
+		},
+	} {
+		group.Add(1)
+		go func(register func() error) {
+			defer group.Done()
+			<-start
+			if err := register(); err != nil {
+				failures <- err
+			}
+		}(register)
+	}
+	close(start)
+	group.Wait()
+	close(failures)
+	for err := range failures {
+		t.Fatal(err)
+	}
+
+	account, ok := service.Account(currentAccount.AuthID)
+	if !ok || account.ProfileDir != current {
+		t.Fatalf("account = %#v, want current profile %q", account, current)
+	}
+	if _, err := os.Stat(current); err != nil {
+		t.Fatalf("current profile was removed: %v", err)
+	}
+}
+
+func TestRestoreAccountIfAbsentReturnsCurrentWhenStaleProfileWasDeleted(t *testing.T) {
+	service, _ := testService(t)
+	current := managedProfile(t, service, "current")
+	currentAccount := Account{AuthID: "cursor-same", Label: "current", ProfileDir: current}
+	if _, err := service.RegisterAccount(currentAccount); err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := service.paths.ProfilesRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := Account{AuthID: currentAccount.AuthID, Label: "stale", ProfileDir: filepath.Join(profiles, "deleted-stale")}
+
+	restored, err := service.RestoreAccountIfAbsent(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.ProfileDir != current {
+		t.Fatalf("restored account = %#v, want current profile %q", restored, current)
+	}
+}
+
 func TestRegisterAccountIsSafeUnderConcurrentLoginAndExecution(t *testing.T) {
 	service, factory := testService(t)
 	var group sync.WaitGroup

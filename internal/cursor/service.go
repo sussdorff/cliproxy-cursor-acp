@@ -88,26 +88,19 @@ func NewService(config Config, paths *Paths, factory Factory) (*Service, error) 
 // a stored auth record must never be able to aim the official CLI at the host
 // auth directory or any other path the plugin does not own.
 func (s *Service) RegisterAccount(account Account) (Account, error) {
-	if strings.TrimSpace(account.Model) == "" {
-		account.Model = DefaultModel
-	}
-	if err := account.validate(); err != nil {
-		return Account{}, fatal("invalid_account", err)
-	}
-	profile, err := s.managedProfileDir(account.ProfileDir)
+	account, err := s.normalizeManagedAccount(account)
 	if err != nil {
-		return Account{}, fatal("invalid_profile", fmt.Errorf("cursor account %q profile directory: %w", account.AuthID, err))
+		return Account{}, err
 	}
-	account.ProfileDir = profile
 	s.mu.Lock()
 	for authID, runtime := range s.accounts {
-		if authID != account.AuthID && runtime.account.ProfileDir == profile {
+		if authID != account.AuthID && runtime.account.ProfileDir == account.ProfileDir {
 			s.mu.Unlock()
 			return Account{}, fatal("profile_conflict", fmt.Errorf("cursor account %q already owns that profile directory", authID))
 		}
 	}
 	existing := s.accounts[account.AuthID]
-	if existing != nil && existing.account.ProfileDir == profile {
+	if existing != nil && existing.account.ProfileDir == account.ProfileDir {
 		existing.account = account
 		s.mu.Unlock()
 		return account, nil
@@ -126,11 +119,54 @@ func (s *Service) RegisterAccount(account Account) (Account, error) {
 	// Re-authenticating one Cursor account moves it to a new profile. The old
 	// profile still holds live credential material, so it is removed once its
 	// process is gone. Only managed paths are ever deleted.
-	if replaced != "" && replaced != profile {
+	if replaced != "" && replaced != account.ProfileDir {
 		if _, err = s.managedProfileDir(replaced); err == nil {
 			_ = os.RemoveAll(replaced)
 		}
 	}
+	return account, nil
+}
+
+// RestoreAccountIfAbsent restores an account from a stored host record only
+// when that AuthID has no current runtime. The lookup and insertion share one
+// lock so a replay cannot replace a profile registered by a completed login.
+func (s *Service) RestoreAccountIfAbsent(account Account) (Account, error) {
+	if existing, ok := s.Account(account.AuthID); ok {
+		return existing, nil
+	}
+	account, err := s.normalizeManagedAccount(account)
+	if err != nil {
+		if existing, ok := s.Account(account.AuthID); ok {
+			return existing, nil
+		}
+		return Account{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing := s.accounts[account.AuthID]; existing != nil {
+		return existing.account, nil
+	}
+	for authID, runtime := range s.accounts {
+		if authID != account.AuthID && runtime.account.ProfileDir == account.ProfileDir {
+			return Account{}, fatal("profile_conflict", fmt.Errorf("cursor account %q already owns that profile directory", authID))
+		}
+	}
+	s.accounts[account.AuthID] = &accountRuntime{account: account, sessions: make(map[string]string), turn: make(chan struct{}, 1)}
+	return account, nil
+}
+
+func (s *Service) normalizeManagedAccount(account Account) (Account, error) {
+	if strings.TrimSpace(account.Model) == "" {
+		account.Model = DefaultModel
+	}
+	if err := account.validate(); err != nil {
+		return Account{}, fatal("invalid_account", err)
+	}
+	profile, err := s.managedProfileDir(account.ProfileDir)
+	if err != nil {
+		return Account{}, fatal("invalid_profile", fmt.Errorf("cursor account %q profile directory: %w", account.AuthID, err))
+	}
+	account.ProfileDir = profile
 	return account, nil
 }
 
