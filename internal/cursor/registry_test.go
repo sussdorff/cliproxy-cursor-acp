@@ -163,6 +163,9 @@ func TestRestoreAccountIfAbsentKeepsCurrentConcurrentRegistration(t *testing.T) 
 	}
 
 	account, ok := service.Account(currentAccount.AuthID)
+	// Either operation may acquire the mutex first: registration either replaces
+	// a restored record or restore returns the registered record. Both orders
+	// must converge on the current login profile.
 	if !ok || account.ProfileDir != current {
 		t.Fatalf("account = %#v, want current profile %q", account, current)
 	}

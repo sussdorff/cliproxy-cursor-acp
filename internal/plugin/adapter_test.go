@@ -51,6 +51,30 @@ type availableProbe struct{}
 
 func (availableProbe) Probe(context.Context, cursor.Account) (bool, error) { return true, nil }
 
+type blockingReplacementProbe struct {
+	mu      sync.Mutex
+	calls   int
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingReplacementProbe) Probe(ctx context.Context, _ cursor.Account) (bool, error) {
+	p.mu.Lock()
+	p.calls++
+	first := p.calls == 1
+	p.mu.Unlock()
+	if !first {
+		return true, nil
+	}
+	close(p.started)
+	select {
+	case <-p.release:
+		return false, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
+
 // fakeAgentScript stands in for the official Cursor CLI. It performs no network
 // access and writes its opaque marker where the real CLI keeps credentials.
 const fakeAgentScript = `#!/bin/sh
@@ -335,6 +359,70 @@ func TestParseAuthDoesNotReplaceCurrentAccountWithStaleStoredProfile(t *testing.
 	}
 	if _, err = os.Stat(currentProfile); err != nil {
 		t.Fatalf("current profile was removed by stale replay: %v", err)
+	}
+}
+
+func TestAuthResponsesReprobeTheCurrentAccountAfterReplacement(t *testing.T) {
+	operations := map[string]func(context.Context, *Adapter, pluginapi.AuthData) (pluginapi.AuthData, error){
+		"parse": func(ctx context.Context, adapter *Adapter, stored pluginapi.AuthData) (pluginapi.AuthData, error) {
+			response, err := adapter.ParseAuth(ctx, pluginapi.AuthParseRequest{Provider: cursor.ProviderID, RawJSON: stored.StorageJSON})
+			return response.Auth, err
+		},
+		"refresh": func(ctx context.Context, adapter *Adapter, stored pluginapi.AuthData) (pluginapi.AuthData, error) {
+			response, err := adapter.RefreshAuth(ctx, pluginapi.AuthRefreshRequest{AuthID: stored.ID, StorageJSON: stored.StorageJSON})
+			return response.Auth, err
+		},
+	}
+	for name, operation := range operations {
+		t.Run(name, func(t *testing.T) {
+			origin := newHarness(t, writeFakeAgent(t))
+			stored := completeLogin(t, origin.adapter)
+			replaying := newHarnessAt(t, writeFakeAgent(t), origin.dataRoot)
+			probe := &blockingReplacementProbe{started: make(chan struct{}), release: make(chan struct{})}
+			replaying.adapter.prober = probe
+
+			result := make(chan struct {
+				auth pluginapi.AuthData
+				err  error
+			}, 1)
+			go func() {
+				auth, err := operation(context.Background(), replaying.adapter, stored)
+				result <- struct {
+					auth pluginapi.AuthData
+					err  error
+				}{auth: auth, err: err}
+			}()
+			<-probe.started
+
+			profiles, err := replaying.paths.ProfilesRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			currentProfile := filepath.Join(profiles, "current-replacement")
+			if err = os.MkdirAll(currentProfile, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.Chmod(currentProfile, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = replaying.service.RegisterAccount(cursor.Account{AuthID: stored.ID, Label: "current", ProfileDir: currentProfile, Model: "current", Email: "current@example.test"}); err != nil {
+				t.Fatal(err)
+			}
+			close(probe.release)
+			response := <-result
+			if response.err != nil {
+				t.Fatal(response.err)
+			}
+			if got := mustProfileDir(t, response.auth); got != currentProfile {
+				t.Fatalf("storage profile = %q, want current profile %q", got, currentProfile)
+			}
+			if response.auth.Label != "current" || response.auth.Disabled || response.auth.Metadata["status"] != "available" {
+				t.Fatalf("auth response = %#v", response.auth)
+			}
+			if _, err = os.Stat(currentProfile); err != nil {
+				t.Fatalf("current profile was removed: %v", err)
+			}
+		})
 	}
 }
 

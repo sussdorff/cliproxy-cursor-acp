@@ -19,13 +19,21 @@ type Metadata struct {
 }
 
 func (s *Service) Metadata(authID string) (Metadata, error) {
+	_, metadata, err := s.AccountWithMetadata(authID)
+	return metadata, err
+}
+
+// AccountWithMetadata returns an account and its management metadata from one
+// runtime snapshot. Callers that perform work outside the service lock can use
+// it to verify that the account did not change before serializing a response.
+func (s *Service) AccountWithMetadata(authID string) (Account, Metadata, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	runtime := s.accounts[authID]
 	if runtime == nil {
-		return Metadata{}, fatal("unknown_auth", ErrUnknownAuth)
+		return Account{}, Metadata{}, fatal("unknown_auth", ErrUnknownAuth)
 	}
-	return Metadata{
+	return runtime.account, Metadata{
 		AuthID: authID, Label: runtime.account.Label, Authenticated: true,
 		Status: "available", Model: runtime.account.Model,
 		ObservedInputTokens: runtime.inputTokens, ObservedOutputTokens: runtime.outputTokens,

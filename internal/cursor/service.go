@@ -128,8 +128,8 @@ func (s *Service) RegisterAccount(account Account) (Account, error) {
 }
 
 // RestoreAccountIfAbsent restores an account from a stored host record only
-// when that AuthID has no current runtime. The lookup and insertion share one
-// lock so a replay cannot replace a profile registered by a completed login.
+// when that AuthID has no current runtime. The deciding absence check and
+// insertion share one lock so a replay cannot replace a completed login.
 func (s *Service) RestoreAccountIfAbsent(account Account) (Account, error) {
 	if existing, ok := s.Account(account.AuthID); ok {
 		return existing, nil

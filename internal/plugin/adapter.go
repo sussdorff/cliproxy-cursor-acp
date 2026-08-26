@@ -243,18 +243,47 @@ func accountFromStored(stored storedAuth) cursor.Account {
 	return cursor.Account{AuthID: strings.TrimSpace(stored.AuthID), Label: label, ProfileDir: strings.TrimSpace(stored.ProfileDir), Model: model, Email: strings.TrimSpace(stored.Email)}
 }
 
+const authDataProbeAttempts = 2
+
 func (a *Adapter) authData(ctx context.Context, account cursor.Account) pluginapi.AuthData {
-	metadata, err := a.service.Metadata(account.AuthID)
-	if err != nil {
-		metadata = cursor.Metadata{AuthID: account.AuthID, Label: account.Label, Status: "unavailable"}
+	// A probe can block while a re-login replaces the runtime profile. Re-probe
+	// the replacement before serializing so every response field names one
+	// account snapshot rather than mixing an old probe with new storage.
+	for attempt := 0; attempt < authDataProbeAttempts; attempt++ {
+		snapshot, metadata, err := a.service.AccountWithMetadata(account.AuthID)
+		if err != nil {
+			break
+		}
+		available := false
+		if a.prober != nil {
+			available, _ = a.prober.Probe(ctx, snapshot)
+		}
+		current, _, err := a.service.AccountWithMetadata(snapshot.AuthID)
+		if err == nil && current == snapshot {
+			return authDataFromSnapshot(snapshot, metadata, available, true)
+		}
+		if err != nil {
+			break
+		}
+		account = current
 	}
-	available := false
-	if a.prober != nil {
-		available, _ = a.prober.Probe(ctx, account)
+
+	// Repeated replacements cannot safely inherit a probe result. Return the
+	// latest complete snapshot as unavailable instead of combining fields from
+	// different profiles.
+	if snapshot, metadata, err := a.service.AccountWithMetadata(account.AuthID); err == nil {
+		return authDataFromSnapshot(snapshot, metadata, false, false)
 	}
+	return authDataFromSnapshot(account, cursor.Metadata{AuthID: account.AuthID, Label: account.Label, Status: "unavailable"}, false, false)
+}
+
+func authDataFromSnapshot(account cursor.Account, metadata cursor.Metadata, available, stable bool) pluginapi.AuthData {
 	storage, _ := json.Marshal(storedAuth{Type: cursor.ProviderID, AuthID: account.AuthID, ProfileDir: account.ProfileDir, Email: account.Email, Label: account.Label, Model: account.Model})
-	status := "unauthenticated"
-	if available {
+	status := "unavailable"
+	if stable && !available {
+		status = "unauthenticated"
+	}
+	if stable && available {
 		status = "available"
 	}
 	return pluginapi.AuthData{
