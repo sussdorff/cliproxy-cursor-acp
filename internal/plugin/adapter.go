@@ -16,7 +16,7 @@ import (
 	"github.com/sussdorff/cliproxy-cursor-acp/internal/cursor"
 )
 
-const Version = "0.2.3"
+const Version = "0.2.4"
 
 // Options collects the collaborators an adapter needs. Every account is created
 // at runtime by the login flow or reconstructed from a stored auth record.
@@ -193,7 +193,7 @@ func (a *Adapter) ModelsForAuth(_ context.Context, request pluginapi.AuthModelRe
 	if !ok {
 		return pluginapi.ModelResponse{}, cursor.ErrUnknownAuth
 	}
-	return pluginapi.ModelResponse{Provider: cursor.ProviderID, Models: []pluginapi.ModelInfo{{ID: "cursor/" + account.Model, Object: "model", OwnedBy: "cursor", Name: account.Model, DisplayName: account.Model, Type: "chat-completion", SupportedInputModalities: []string{"text"}}}}, nil
+	return pluginapi.ModelResponse{Provider: cursor.ProviderID, Models: []pluginapi.ModelInfo{{ID: account.Model, Object: "model", OwnedBy: "cursor", Name: account.Model, DisplayName: account.Model, Type: "chat-completion", SupportedInputModalities: []string{"text"}}}}, nil
 }
 
 func (a *Adapter) Execute(ctx context.Context, request pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
@@ -206,7 +206,7 @@ func (a *Adapter) Execute(ctx context.Context, request pluginapi.ExecutorRequest
 		return pluginapi.ExecutorResponse{}, cursor.ValidationFailure("unknown_auth", "selected account is not registered")
 	}
 	actualModel := "cursor/" + account.Model
-	if request.Model != "" && request.Model != actualModel {
+	if request.Model != "" && request.Model != account.Model && request.Model != actualModel {
 		return pluginapi.ExecutorResponse{}, cursor.ValidationFailure("model_mismatch", "selected account does not provide requested model")
 	}
 	result, err := a.service.Execute(ctx, cursor.Request{AuthID: request.AuthID, ConversationID: conversationID, Prompt: prompt, Stateless: stateless})
