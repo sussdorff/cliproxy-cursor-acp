@@ -171,8 +171,8 @@ set `agent_package_sha256`.
 - Activation is atomic: the staged directory is renamed into
   `<data_root>/agent/versions/<version>` and the `current` symlink is replaced
   through a rename. A failed activation restores the previous version.
-- The recorded digest, the trust mode, and the embedded pin are reported by the
-  setup status route and shown on the setup page.
+- The authenticated setup status route reports the recorded digest and effective
+  trust mode. The unauthenticated setup page shows only the embedded pin.
 
 ## Management surface
 

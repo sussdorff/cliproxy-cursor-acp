@@ -99,8 +99,9 @@ management key and press **Install official Cursor Agent CLI**. The install:
 - activates atomically under `<data_root>/agent/versions/<version>` behind a
   `current` pointer.
 
-The setup page and the status route show which version and digest are trusted
-and which were installed.
+The authenticated status route reports the version and digest actually trusted
+and installed. The unauthenticated setup page shows only this build's embedded
+pinned version and digest.
 
 If you already provide the CLI yourself — on `PATH` or through the `executable`
 configuration key — skip this step.
@@ -108,19 +109,27 @@ configuration key — skip this step.
 #### Installing a Cursor version other than the pinned one
 
 Cursor publishes no checksum file, so the plugin ships its own pin and never
-installs an artifact it cannot verify. To move off the pinned version, verify
-the digest yourself and configure it:
+installs an artifact it cannot verify. Do not use a digest calculated from the
+same download as evidence for a custom version. Only use this override when an
+independently trusted 64-character sha256 is available through your
+organization's software-approval process and recorded before downloading the
+archive.
 
 ```sh
-curl -sL https://downloads.cursor.com/lab/<version>/linux/x64/agent-cli-package.tar.gz | shasum -a 256
+EXPECTED_SHA256='<independently trusted sha256>'
+curl -fsSLo agent-cli-package.tar.gz https://downloads.cursor.com/lab/<version>/linux/x64/agent-cli-package.tar.gz
+printf '%s  %s\n' "$EXPECTED_SHA256" agent-cli-package.tar.gz | shasum -a 256 -c -
 ```
+
+Configure exactly that independently trusted value only after the comparison
+reports `OK`:
 
 ```yaml
 plugins:
   configs:
     cliproxy-cursor-acp:
       agent_install_source: latest   # parse cursor.com/install for the current release
-      agent_package_sha256: "<the digest you just verified>"
+      agent_package_sha256: "<independently trusted sha256>"
 ```
 
 `agent_install_source: latest` **requires** `agent_package_sha256`; without it

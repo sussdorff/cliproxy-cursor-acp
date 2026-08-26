@@ -252,6 +252,8 @@ func installFailureMessage(err error) string {
 		return "the Cursor Agent package exceeded its size limit"
 	case "agent_package_checksum_mismatch":
 		return "the Cursor Agent package did not match the configured sha256 pin"
+	case "agent_package_pin_required":
+		return "no trusted sha256 is available for this artifact; set the agent_package_sha256 configuration key"
 	case "agent_archive_unsafe":
 		return "the Cursor Agent package contained an unsafe archive entry"
 	case "agent_archive_invalid":

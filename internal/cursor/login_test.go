@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -72,6 +75,15 @@ func TestAgentHelperProcess(t *testing.T) {
 			}
 			fmt.Println(approval)
 			_ = os.WriteFile(marker, []byte(email), 0o600)
+		case "detached":
+			fmt.Println(approval)
+			_ = os.WriteFile(marker, []byte(email), 0o600)
+			detached := exec.Command(os.Args[0], "-test.run=TestAgentHelperProcess", "--", "detached")
+			detached.Env = append(os.Environ(), "GO_WANT_FAKE_AGENT=1", "CURSOR_CONFIG_DIR="+profile)
+			if err := detached.Start(); err != nil {
+				os.Exit(7)
+			}
+			_ = os.WriteFile(filepath.Join(profile, "detached-pid"), []byte(strconv.Itoa(detached.Process.Pid)), 0o600)
 		default:
 			fmt.Println(approval)
 			_ = os.WriteFile(marker, []byte(email), 0o600)
@@ -83,11 +95,20 @@ func TestAgentHelperProcess(t *testing.T) {
 		}
 		fmt.Println(`{"isAuthenticated":true}`)
 	case "about":
+		if os.Getenv("FAKE_AGENT_ABOUT") == "fail" {
+			os.Exit(8)
+		}
 		stored, err := os.ReadFile(marker)
 		if err != nil {
 			os.Exit(1)
 		}
+		if os.Getenv("FAKE_AGENT_ABOUT") == "empty" {
+			fmt.Println(`{"tier":"pro","version":"2026.08.11"}`)
+			break
+		}
 		fmt.Printf("{\"userEmail\":%q,\"tier\":\"pro\",\"version\":\"2026.08.11\"}\n", string(stored))
+	case "detached":
+		time.Sleep(30 * time.Second)
 	default:
 		os.Exit(6)
 	}
@@ -174,6 +195,64 @@ func TestLoginStartReturnsApprovalURLAndPollCreatesPrivateAccount(t *testing.T) 
 		if _, errStat := os.Stat(filepath.Join(result.Account.ProfileDir, name)); errStat == nil {
 			t.Fatalf("authenticated profile still holds the login capture %q", name)
 		}
+	}
+}
+
+func TestPollReapsDetachedLoginProcessGroupAfterSuccess(t *testing.T) {
+	login := testLogin(t, "detached")
+	defer login.Close()
+	start, err := login.Start(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := waitForLogin(t, login, start.State)
+	if !result.Authenticated {
+		t.Fatalf("login result = %#v", result)
+	}
+	rawPID, err := os.ReadFile(filepath.Join(result.Account.ProfileDir, "detached-pid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err = syscall.Kill(pid, syscall.Signal(0))
+		if err == syscall.ESRCH {
+			return
+		}
+		if err != nil {
+			t.Fatalf("probe detached login process: %v", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("detached login process %d survived a successful poll", pid)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func TestPollRejectsFailedOrIncompleteAboutProbe(t *testing.T) {
+	for _, mode := range []string{"fail", "empty"} {
+		t.Run(mode, func(t *testing.T) {
+			login := testLogin(t, "")
+			login.ExtraEnv = append(login.ExtraEnv, "FAKE_AGENT_ABOUT="+mode)
+			defer login.Close()
+			start, err := login.Start(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := waitForLogin(t, login, start.State)
+			if result.Authenticated {
+				t.Fatalf("incomplete about probe authenticated an account: %#v", result)
+			}
+			if result.Message != "the Cursor login could not be confirmed" {
+				t.Fatalf("failure message = %q", result.Message)
+			}
+			assertNoProfilesLeft(t, login)
+		})
 	}
 }
 

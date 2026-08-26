@@ -55,19 +55,21 @@ func (availableProbe) Probe(context.Context, cursor.Account) (bool, error) { ret
 // access and writes its opaque marker where the real CLI keeps credentials.
 const fakeAgentScript = `#!/bin/sh
 marker="$CURSOR_CONFIG_DIR/fake-account"
+profile_id=${CURSOR_CONFIG_DIR##*/}
 case "$1" in
   login)
     test "$NO_OPEN_BROWSER" = "1" || exit 3
     test -z "$CURSOR_API_KEY" || exit 4
-    echo "https://cursor.com/loginDeepControl?challenge=$(basename "$CURSOR_CONFIG_DIR")"
-    printf '%s' "user-$(basename "$CURSOR_CONFIG_DIR")@example.test" > "$marker"
+    echo "https://cursor.com/loginDeepControl?challenge=$profile_id"
+    printf '%s' "user-$profile_id@example.test" > "$marker"
     ;;
   status)
     if test -f "$marker"; then echo '{"isAuthenticated":true}'; else echo '{"isAuthenticated":false}'; fi
     ;;
   about)
     test -f "$marker" || exit 1
-    printf '{"userEmail":"%s","tier":"pro","version":"2026.08.11"}\n' "$(cat "$marker")"
+    IFS= read -r email < "$marker"
+    printf '{"userEmail":"%s","tier":"pro","version":"2026.08.11"}\n' "$email"
     ;;
   *)
     exit 6
@@ -176,6 +178,13 @@ func TestRegistrationExposesCLIProxyAPICapabilities(t *testing.T) {
 	}
 	if registration.Metadata.Version != Version {
 		t.Fatalf("metadata version = %q", registration.Metadata.Version)
+	}
+}
+
+func TestInstallFailureMessageExplainsMissingArtifactPin(t *testing.T) {
+	err := cursor.ValidationFailure("agent_package_pin_required", "agent_package_sha256 is required")
+	if got := installFailureMessage(err); !strings.Contains(got, "agent_package_sha256") {
+		t.Fatalf("missing pin message = %q", got)
 	}
 }
 

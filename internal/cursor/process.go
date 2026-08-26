@@ -17,8 +17,9 @@ import (
 // CommandFactory starts only the official `agent acp` stdio protocol. It does
 // not use a shell, private Cursor endpoints, or Cursor credential files.
 type CommandFactory struct {
-	// Executable pins the official CLI path. Resolve is used instead when set,
-	// because a managed install can appear after the plugin is configured.
+	// Executable pins the official CLI path and wins when it is set. Resolve is
+	// used when Executable is empty, because a managed install can appear after
+	// the plugin is configured.
 	Executable string
 	Resolve    func() (string, error)
 	BaseEnv    []string

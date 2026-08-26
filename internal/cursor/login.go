@@ -373,6 +373,9 @@ func (l *Login) Poll(ctx context.Context, state string) (LoginResult, error) {
 		l.finish(state, session)
 		return LoginResult{Message: publicLoginMessage(err)}, nil
 	}
+	// The login leader has already been reaped, but Cursor can leave a worker in
+	// its process group. The authenticated profile persists independently.
+	terminateRemainingGroup(session.pgid)
 	l.drop(state)
 	// The approval URL lives in these captures; the authenticated profile keeps
 	// only what the official CLI put there.
@@ -487,8 +490,15 @@ func (l *Login) confirm(ctx context.Context, profileDir string) (Account, string
 	if !known || !authenticated {
 		return Account{}, "", "", fatal("login_not_authenticated", fmt.Errorf("the official Cursor CLI did not report an authenticated account"))
 	}
-	about, _ := l.runProbe(ctx, profileDir, l.arguments(l.AboutArgs, "about"))
+	about, err := l.runProbe(ctx, profileDir, l.arguments(l.AboutArgs, "about"))
+	if err != nil {
+		return Account{}, "", "", err
+	}
 	email, tier, version := parseAbout(about)
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return Account{}, "", "", fatal("login_account_unavailable", fmt.Errorf("the official Cursor CLI did not report an account email"))
+	}
 	account := Account{
 		AuthID:     accountIdentity(email, filepath.Base(profileDir)),
 		Label:      firstNonEmpty(email, filepath.Base(profileDir)),

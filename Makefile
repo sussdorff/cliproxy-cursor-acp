@@ -2,6 +2,8 @@
 
 VERSION ?= $(shell awk -F'"' '/"version"/{print $$4; exit}' plugin-store/registry.json)
 GO_VERSION ?= $(shell awk '/^go /{print $$2; exit}' go.mod)
+# Keep this digest synchronized with .github/workflows/release.yml.
+GOLANG_IMAGE := golang@sha256:fb612b7831d53a89cbc0aaa7855b69ad7b0caf603715860cf538df854d047b84
 PLUGIN_ID := cliproxy-cursor-acp
 ARCHIVE := $(PLUGIN_ID)_$(VERSION)_linux_amd64.zip
 
@@ -24,7 +26,7 @@ build-linux:
 	mkdir -p build
 	docker run --rm -v "$(CURDIR)":/src -w /src \
 		-e CGO_ENABLED=1 -e GOOS=linux -e GOARCH=amd64 -e GOFLAGS=-buildvcs=false \
-		golang:$(GO_VERSION) \
+		$(GOLANG_IMAGE) \
 		go build -buildmode=c-shared -trimpath -o build/$(PLUGIN_ID).so ./cmd/$(PLUGIN_ID)
 
 # release-archive produces the exact plugin-store asset names from an existing
