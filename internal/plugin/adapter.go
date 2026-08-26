@@ -16,7 +16,7 @@ import (
 	"github.com/sussdorff/cliproxy-cursor-acp/internal/cursor"
 )
 
-const Version = "0.2.5"
+const Version = "0.2.6"
 
 // Options collects the collaborators an adapter needs. Every account is created
 // at runtime by the login flow or reconstructed from a stored auth record.
@@ -167,17 +167,9 @@ func (a *Adapter) PollLogin(ctx context.Context, request pluginapi.AuthLoginPoll
 
 func (a *Adapter) RefreshAuth(ctx context.Context, request pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
 	a.paths.ObserveHost(request.Host.AuthDir)
-	account, ok := a.service.Account(request.AuthID)
-	if !ok {
-		var stored storedAuth
-		if err := json.Unmarshal(request.StorageJSON, &stored); err != nil || strings.TrimSpace(stored.ProfileDir) == "" {
-			return pluginapi.AuthRefreshResponse{}, cursor.ErrUnknownAuth
-		}
-		registered, err := a.service.RestoreAccountIfAbsent(accountFromStored(stored))
-		if err != nil {
-			return pluginapi.AuthRefreshResponse{}, err
-		}
-		account = registered
+	account, err := a.restoreAccountFromStorage(request.AuthID, request.StorageJSON)
+	if err != nil {
+		return pluginapi.AuthRefreshResponse{}, err
 	}
 	return pluginapi.AuthRefreshResponse{Auth: a.authData(ctx, account), NextRefreshAfter: time.Now().Add(5 * time.Minute)}, nil
 }
@@ -189,9 +181,9 @@ func (a *Adapter) StaticModels(_ context.Context, request pluginapi.StaticModelR
 
 func (a *Adapter) ModelsForAuth(_ context.Context, request pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
 	a.paths.ObserveHost(request.Host.AuthDir)
-	account, ok := a.service.Account(request.AuthID)
-	if !ok {
-		return pluginapi.ModelResponse{}, cursor.ErrUnknownAuth
+	account, err := a.restoreAccountFromStorage(request.AuthID, request.StorageJSON)
+	if err != nil {
+		return pluginapi.ModelResponse{}, err
 	}
 	return pluginapi.ModelResponse{Provider: cursor.ProviderID, Models: []pluginapi.ModelInfo{{ID: account.Model, Object: "model", OwnedBy: "cursor", Name: account.Model, DisplayName: account.Model, Type: "chat-completion", SupportedInputModalities: []string{"text"}}}}, nil
 }
@@ -201,8 +193,8 @@ func (a *Adapter) Execute(ctx context.Context, request pluginapi.ExecutorRequest
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
-	account, ok := a.service.Account(request.AuthID)
-	if !ok {
+	account, err := a.restoreAccountFromStorage(request.AuthID, request.StorageJSON)
+	if err != nil {
 		return pluginapi.ExecutorResponse{}, cursor.ValidationFailure("unknown_auth", "selected account is not registered")
 	}
 	actualModel := "cursor/" + account.Model
@@ -241,6 +233,23 @@ func accountFromStored(stored storedAuth) cursor.Account {
 		label = firstNonEmpty(stored.Email, stored.AuthID)
 	}
 	return cursor.Account{AuthID: strings.TrimSpace(stored.AuthID), Label: label, ProfileDir: strings.TrimSpace(stored.ProfileDir), Model: model, Email: strings.TrimSpace(stored.Email)}
+}
+
+// restoreAccountFromStorage reconstructs an account only from the host's
+// selected record. CLIProxyAPI provides this storage on both per-auth model and
+// executor calls, including when they arrive before an auth-parse callback.
+func (a *Adapter) restoreAccountFromStorage(authID string, storageJSON []byte) (cursor.Account, error) {
+	if account, ok := a.service.Account(authID); ok {
+		return account, nil
+	}
+	var stored storedAuth
+	if err := json.Unmarshal(storageJSON, &stored); err != nil {
+		return cursor.Account{}, cursor.ErrUnknownAuth
+	}
+	if strings.TrimSpace(authID) == "" || strings.TrimSpace(stored.AuthID) != authID || strings.TrimSpace(stored.ProfileDir) == "" {
+		return cursor.Account{}, cursor.ErrUnknownAuth
+	}
+	return a.service.RestoreAccountIfAbsent(accountFromStored(stored))
 }
 
 const authDataProbeAttempts = 2
