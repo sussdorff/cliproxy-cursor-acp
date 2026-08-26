@@ -196,6 +196,44 @@ func TestRestoreAccountIfAbsentReturnsCurrentWhenStaleProfileWasDeleted(t *testi
 	}
 }
 
+func TestRestoreAccountIfAbsentReturnsCurrentAfterStaleProfileNormalizationFails(t *testing.T) {
+	service, _ := testService(t)
+	profiles, err := service.paths.ProfilesRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := Account{AuthID: "cursor-same", Label: "stale", ProfileDir: filepath.Join(profiles, "deleted-stale")}
+	currentProfile := managedProfile(t, service, "current")
+	current := Account{AuthID: stale.AuthID, Label: "current", ProfileDir: currentProfile, Model: DefaultModel}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	type result struct {
+		account Account
+		err     error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		account, restoreErr := service.restoreAccountIfAbsent(stale, func(account Account) (Account, error) {
+			close(started)
+			<-release
+			return service.normalizeManagedAccount(account)
+		})
+		resultCh <- result{account: account, err: restoreErr}
+	}()
+	<-started
+	if _, err = service.RegisterAccount(current); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	restored := <-resultCh
+	if restored.err != nil {
+		t.Fatalf("restore error = %v, want current account", restored.err)
+	}
+	if restored.account != current {
+		t.Fatalf("restored account = %#v, want %#v", restored.account, current)
+	}
+}
+
 func TestRegisterAccountIsSafeUnderConcurrentLoginAndExecution(t *testing.T) {
 	service, factory := testService(t)
 	var group sync.WaitGroup

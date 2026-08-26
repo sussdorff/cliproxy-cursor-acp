@@ -131,16 +131,22 @@ func (s *Service) RegisterAccount(account Account) (Account, error) {
 // when that AuthID has no current runtime. The deciding absence check and
 // insertion share one lock so a replay cannot replace a completed login.
 func (s *Service) RestoreAccountIfAbsent(account Account) (Account, error) {
-	if existing, ok := s.Account(account.AuthID); ok {
+	return s.restoreAccountIfAbsent(account, s.normalizeManagedAccount)
+}
+
+func (s *Service) restoreAccountIfAbsent(account Account, normalize func(Account) (Account, error)) (Account, error) {
+	authID := account.AuthID
+	if existing, ok := s.Account(authID); ok {
 		return existing, nil
 	}
-	account, err := s.normalizeManagedAccount(account)
+	normalized, err := normalize(account)
 	if err != nil {
-		if existing, ok := s.Account(account.AuthID); ok {
+		if existing, ok := s.Account(authID); ok {
 			return existing, nil
 		}
 		return Account{}, err
 	}
+	account = normalized
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing := s.accounts[account.AuthID]; existing != nil {
