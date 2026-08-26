@@ -221,7 +221,10 @@ func isolatedEnv(base []string, profileDir string) []string {
 			}
 		}
 	}
-	return append(env, "CURSOR_CONFIG_DIR="+profileDir)
+	// Cursor keeps its authentication below XDG_CONFIG_HOME, independently of
+	// CURSOR_CONFIG_DIR. Pin both to the managed account profile so a later
+	// login cannot replace the credentials used by another account.
+	return append(env, "CURSOR_CONFIG_DIR="+profileDir, "XDG_CONFIG_HOME="+profileDir)
 }
 
 type acpProcess struct {
