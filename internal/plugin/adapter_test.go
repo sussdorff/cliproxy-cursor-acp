@@ -296,6 +296,48 @@ func TestParseAuthReconstructsAccountsAfterHostRestart(t *testing.T) {
 	}
 }
 
+func TestParseAuthDoesNotReplaceCurrentAccountWithStaleStoredProfile(t *testing.T) {
+	harness := newHarness(t, writeFakeAgent(t))
+	currentAuth := completeLogin(t, harness.adapter)
+	currentProfile := mustProfileDir(t, currentAuth)
+
+	profiles, err := harness.paths.ProfilesRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleProfile := filepath.Join(profiles, "stale-host-record")
+	if err = os.MkdirAll(staleProfile, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(staleProfile, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var stale storedAuth
+	if err = json.Unmarshal(currentAuth.StorageJSON, &stale); err != nil {
+		t.Fatal(err)
+	}
+	stale.ProfileDir = staleProfile
+	staleRaw, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := harness.adapter.ParseAuth(context.Background(), pluginapi.AuthParseRequest{Provider: cursor.ProviderID, RawJSON: staleRaw})
+	if err != nil || !response.Handled {
+		t.Fatalf("ParseAuth() = %#v, %v", response, err)
+	}
+	account, ok := harness.service.Account(currentAuth.ID)
+	if !ok || account.ProfileDir != currentProfile {
+		t.Fatalf("current account = %#v, want profile %q", account, currentProfile)
+	}
+	if got := mustProfileDir(t, response.Auth); got != currentProfile {
+		t.Fatalf("returned storage profile = %q, want current profile %q", got, currentProfile)
+	}
+	if _, err = os.Stat(currentProfile); err != nil {
+		t.Fatalf("current profile was removed by stale replay: %v", err)
+	}
+}
+
 func TestParseAuthIgnoresForeignAndIncompleteRecords(t *testing.T) {
 	harness := newHarness(t, "")
 	cases := []pluginapi.AuthParseRequest{

@@ -16,7 +16,7 @@ import (
 	"github.com/sussdorff/cliproxy-cursor-acp/internal/cursor"
 )
 
-const Version = "0.2.2"
+const Version = "0.2.3"
 
 // Options collects the collaborators an adapter needs. Every account is created
 // at runtime by the login flow or reconstructed from a stored auth record.
@@ -90,8 +90,9 @@ func (a *Adapter) Registration() pluginapi.Plugin {
 
 func (a *Adapter) Identifier() string { return cursor.ProviderID }
 
-// ParseAuth rebuilds one runtime account from a stored auth record. This is the
-// only path by which an account survives a host restart.
+// ParseAuth restores an absent runtime account from a stored auth record. A
+// current-process registration wins over a replayed host record so an older
+// record cannot replace a profile created by a completed login.
 func (a *Adapter) ParseAuth(ctx context.Context, request pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
 	a.paths.ObserveHost(request.Host.AuthDir)
 	if request.Provider != "" && !strings.EqualFold(request.Provider, cursor.ProviderID) {
@@ -103,6 +104,9 @@ func (a *Adapter) ParseAuth(ctx context.Context, request pluginapi.AuthParseRequ
 	}
 	if strings.TrimSpace(stored.AuthID) == "" || strings.TrimSpace(stored.ProfileDir) == "" {
 		return pluginapi.AuthParseResponse{Handled: false}, nil
+	}
+	if account, ok := a.service.Account(stored.AuthID); ok {
+		return pluginapi.AuthParseResponse{Handled: true, Auth: a.authData(ctx, account)}, nil
 	}
 	account, err := a.service.RegisterAccount(accountFromStored(stored))
 	if err != nil {
