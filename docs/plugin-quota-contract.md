@@ -24,19 +24,29 @@ lifts only `priority` and `note` out of `AuthData.Metadata`; it emits no
 `metadata` object at all. This was checked against CLIProxyAPI `v7.2.141` (the
 pinned version) and `v7.2.143`.
 
-Displaying this contract therefore requires a CLIProxyAPI build that copies the
-allowlisted plugin quota onto the list entry as `metadata.plugin_quota`. That
-copy is deliberately narrow:
+Displaying this contract therefore requires a CLIProxyAPI build that projects
+the plugin quota onto the list entry as `metadata.plugin_quota`. The host does
+not pass the payload through; it rebuilds it from an allowlist:
 
-- only `plugin_quota` is copied; every other metadata key, known or unknown,
+- only `plugin_quota` is projected; every other metadata key, known or unknown,
   stays omitted, so tokens, cookies, `access_token`, `refresh_token`, raw
   `id_token` strings, profile paths, `StorageJSON`, and raw upstream bodies
   cannot reach the endpoint through this path;
-- the payload is copied only when it declares `schema: cliproxy.plugin.quota`
-  and a numeric `version`, so an unrelated value parked under the key is never
-  republished;
-- inside a well-formed contract, fields are copied verbatim, so a producer can
-  add optional fields without an intermediate release having to learn them.
+- the payload is projected only when it declares `schema:
+  cliproxy.plugin.quota` and a `version` the host implements, so an unrelated
+  value parked under the key is never republished;
+- **inside the contract, the host emits a version-1 field allowlist and drops
+  every unknown field.** Auth metadata is plugin-controlled all the way down, so
+  a well-formed envelope is no evidence that what it wraps is safe: a value
+  nested inside an otherwise valid contract is dropped exactly like one placed
+  beside it;
+- the allowlisted fields are themselves bounded - at most 32 windows, and text
+  values dropped rather than truncated past 256 bytes.
+
+The allowlist is the version-1 envelope (`schema`, `version`, `provider`,
+`availability`, `observed_at`, `ttl_seconds`, `windows`) and window field set
+documented below, so a contract this plugin publishes today survives the
+projection intact.
 
 Publishing this contract against a CLIProxyAPI build without that change is not
 an error: the payload is still written to auth metadata, it is simply not
@@ -122,3 +132,9 @@ bodies never appear in this payload or anywhere else in auth metadata.
 Add optional fields without changing `version`; consumers ignore unknown fields.
 Increment `version` only when an existing field changes meaning or a required
 field is added. Producers may publish only one version at a time.
+
+Adding an optional field is compatible but not immediately visible. The host
+projects a fixed allowlist, so a field it has not been taught is dropped before
+any consumer sees it: a new optional field needs a CLIProxyAPI release that
+learns it before a manager UI can display it. Roll out in that order - host
+first, then producer - or the field is silently absent rather than ignored.
