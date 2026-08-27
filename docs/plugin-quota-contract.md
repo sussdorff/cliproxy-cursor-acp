@@ -10,6 +10,38 @@ The payload lives under a single auth-metadata key:
 metadata["plugin_quota"]
 ```
 
+## Where a consumer reads it
+
+CPA-Manager-Plus reads `metadata.plugin_quota` off each entry of
+
+```
+GET /v0/management/auth-files
+```
+
+**That endpoint does not carry auth metadata in a stock CLIProxyAPI build.**
+`buildAuthFileEntryLocked` in `internal/api/handlers/management/auth_files.go`
+lifts only `priority` and `note` out of `AuthData.Metadata`; it emits no
+`metadata` object at all. This was checked against CLIProxyAPI `v7.2.141` (the
+pinned version) and `v7.2.143`.
+
+Displaying this contract therefore requires a CLIProxyAPI build that copies the
+allowlisted plugin quota onto the list entry as `metadata.plugin_quota`. That
+copy is deliberately narrow:
+
+- only `plugin_quota` is copied; every other metadata key, known or unknown,
+  stays omitted, so tokens, cookies, `access_token`, `refresh_token`, raw
+  `id_token` strings, profile paths, `StorageJSON`, and raw upstream bodies
+  cannot reach the endpoint through this path;
+- the payload is copied only when it declares `schema: cliproxy.plugin.quota`
+  and a numeric `version`, so an unrelated value parked under the key is never
+  republished;
+- inside a well-formed contract, fields are copied verbatim, so a producer can
+  add optional fields without an intermediate release having to learn them.
+
+Publishing this contract against a CLIProxyAPI build without that change is not
+an error: the payload is still written to auth metadata, it is simply not
+visible to a manager UI.
+
 ## Payload
 
 ```json
