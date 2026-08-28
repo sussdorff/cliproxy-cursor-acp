@@ -48,6 +48,21 @@ func (testACP) Prompt(context.Context, string, string) (cursor.Result, error) {
 func (testACP) Close() error                               { return nil }
 func (testACP) CloseSession(context.Context, string) error { return nil }
 
+// staticQuota answers every observation with one prepared account-scoped
+// result. It performs no filesystem or network access.
+type staticQuota struct{ quota cursor.Quota }
+
+func (q staticQuota) Fetch(context.Context, cursor.QuotaTarget) (cursor.Quota, error) {
+	return q.quota, nil
+}
+
+// refusedQuota models a profile whose subscription data cannot be observed.
+type refusedQuota struct{}
+
+func (refusedQuota) Fetch(context.Context, cursor.QuotaTarget) (cursor.Quota, error) {
+	return cursor.Quota{}, errors.New("Cursor quota is unavailable")
+}
+
 type availableProbe struct{}
 
 func (availableProbe) Probe(context.Context, cursor.Account) (bool, error) { return true, nil }
@@ -126,9 +141,21 @@ func newHarness(t *testing.T, executable string) *harness {
 	return newHarnessAt(t, executable, t.TempDir())
 }
 
+// newHarnessWithQuota builds an adapter whose subscription observation is a
+// hermetic stand-in, so contract tests never touch Cursor's production origin.
+func newHarnessWithQuota(t *testing.T, executable string, provider cursor.QuotaProvider) *harness {
+	t.Helper()
+	return newHarnessAtWithOptions(t, executable, t.TempDir(), cursor.WithQuotaProvider(provider))
+}
+
 // newHarnessAt builds an adapter over an explicit data root, so a host restart
 // can be modelled by pointing a second adapter at the first one's data root.
 func newHarnessAt(t *testing.T, executable, dataRoot string) *harness {
+	t.Helper()
+	return newHarnessAtWithOptions(t, executable, dataRoot)
+}
+
+func newHarnessAtWithOptions(t *testing.T, executable, dataRoot string, options ...cursor.ServiceOption) *harness {
 	t.Helper()
 	// PATH is emptied so a developer machine's own Cursor CLI never leaks in.
 	t.Setenv("PATH", t.TempDir())
@@ -138,7 +165,7 @@ func newHarnessAt(t *testing.T, executable, dataRoot string) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := cursor.NewService(config, paths, factory)
+	service, err := cursor.NewService(config, paths, factory, options...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -876,4 +903,248 @@ func mustProfileDir(t *testing.T, auth pluginapi.AuthData) string {
 		t.Fatal(err)
 	}
 	return stored.ProfileDir
+}
+
+// cursorSubscriptionObservation is the account-scoped result the safe quota
+// reader produces for a live Cursor subscription.
+var cursorSubscriptionObservation = cursor.Quota{
+	Available: true, WindowStart: "2026-08-01T00:00:00.000Z", WindowEnd: "2026-09-01T00:00:00.000Z",
+	MembershipType: "pro", LimitType: "monthly", Used: 125, Limit: 500, Remaining: 375,
+}
+
+// credentialMarkers are substrings that must never reach generic auth metadata.
+// A quota payload describes consumption, never the material that produced it.
+var credentialMarkers = []string{"accessToken", "access_token", "Cookie", "WorkosCursorSessionToken", "profile_dir", "profileDir", "eyJ"}
+
+func TestAuthMetadataPublishesVersionedGenericQuotaContract(t *testing.T) {
+	harness := newHarnessWithQuota(t, writeFakeAgent(t), staticQuota{quota: cursorSubscriptionObservation})
+	auth := completeLogin(t, harness.adapter)
+
+	payload, ok := auth.Metadata[PluginQuotaMetadataKey]
+	if !ok {
+		t.Fatalf("auth metadata does not carry %q: %#v", PluginQuotaMetadataKey, auth.Metadata)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contract map[string]any
+	if err := json.Unmarshal(encoded, &contract); err != nil {
+		t.Fatal(err)
+	}
+	if contract["schema"] != PluginQuotaSchema {
+		t.Fatalf("schema = %v, want %q", contract["schema"], PluginQuotaSchema)
+	}
+	if contract["version"] != float64(PluginQuotaVersion) {
+		t.Fatalf("version = %v, want %d", contract["version"], PluginQuotaVersion)
+	}
+	if contract["provider"] != cursor.ProviderID {
+		t.Fatalf("provider = %v", contract["provider"])
+	}
+	if contract["availability"] != "available" {
+		t.Fatalf("availability = %v, want available", contract["availability"])
+	}
+	if _, err := time.Parse(time.RFC3339, contract["observed_at"].(string)); err != nil {
+		t.Fatalf("observed_at = %v: %v", contract["observed_at"], err)
+	}
+	if ttl, _ := contract["ttl_seconds"].(float64); ttl <= 0 {
+		t.Fatalf("ttl_seconds = %v, want a positive freshness budget", contract["ttl_seconds"])
+	}
+	windows, _ := contract["windows"].([]any)
+	if len(windows) != 1 {
+		t.Fatalf("windows = %#v, want exactly one subscription window", contract["windows"])
+	}
+	window, _ := windows[0].(map[string]any)
+	for field, want := range map[string]any{
+		"id":             "subscription",
+		"kind":           "monthly",
+		"used":           float64(125),
+		"limit":          float64(500),
+		"remaining":      float64(375),
+		"used_percent":   float64(25),
+		"unlimited":      false,
+		"window_start":   "2026-08-01T00:00:00Z",
+		"window_end":     "2026-09-01T00:00:00Z",
+		"reset_at":       "2026-09-01T00:00:00Z",
+		"reset_accuracy": "exact",
+	} {
+		if window[field] != want {
+			t.Fatalf("window[%q] = %#v, want %#v", field, window[field], want)
+		}
+	}
+	if label, _ := window["label"].(string); strings.TrimSpace(label) == "" {
+		t.Fatalf("window label = %#v, want a display label", window["label"])
+	}
+	if !auth.Disabled && auth.Metadata["status"] != "available" {
+		t.Fatalf("a published quota contract must not change credential availability: %#v", auth.Metadata)
+	}
+	if profileDir, _ := auth.Metadata["profile_dir"].(string); strings.TrimSpace(profileDir) == "" {
+		t.Fatal("auth metadata must carry profile_dir so a host merge cannot keep a stale login path")
+	}
+	assertNoCredentialMaterial(t, auth.Metadata[PluginQuotaMetadataKey])
+}
+
+func TestAuthMetadataPublishesBoundedUnavailableQuotaContract(t *testing.T) {
+	harness := newHarnessWithQuota(t, writeFakeAgent(t), refusedQuota{})
+	auth := completeLogin(t, harness.adapter)
+
+	encoded, err := json.Marshal(auth.Metadata[PluginQuotaMetadataKey])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contract map[string]any
+	if err := json.Unmarshal(encoded, &contract); err != nil {
+		t.Fatal(err)
+	}
+	if contract["availability"] != "unavailable" {
+		t.Fatalf("availability = %v, want unavailable", contract["availability"])
+	}
+	if windows, _ := contract["windows"].([]any); len(windows) != 0 {
+		t.Fatalf("windows = %#v, want none when quota was not observed", contract["windows"])
+	}
+	if contract["version"] != float64(PluginQuotaVersion) || contract["schema"] != PluginQuotaSchema {
+		t.Fatalf("an unavailable contract must stay identifiable: %#v", contract)
+	}
+	// Quota availability is not credential availability: the account stays usable.
+	if auth.Disabled {
+		t.Fatal("an unobservable quota must not disable the credential")
+	}
+	assertNoCredentialMaterial(t, auth.Metadata[PluginQuotaMetadataKey])
+}
+
+func TestPluginQuotaContractMatchesThePublishedGoldenFixture(t *testing.T) {
+	observedAt := time.Date(2026, time.August, 26, 9, 15, 0, 0, time.UTC)
+	remaining := cursorSubscriptionObservation.Remaining
+	contract := buildPluginQuotaContract(cursor.ProviderID, cursor.Metadata{
+		SubscriptionQuotaAvailable: true,
+		ExactSubscriptionQuota:     &remaining,
+		Quota:                      cursorSubscriptionObservation,
+		ObservedAt:                 observedAt.Format(time.RFC3339),
+	})
+	produced, err := json.MarshalIndent(contract, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goldenPath := filepath.Join("testdata", "plugin_quota_cursor_v1.json")
+	golden, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("the cross-repo contract fixture is missing: %v", err)
+	}
+	if strings.TrimSpace(string(produced)) != strings.TrimSpace(string(golden)) {
+		t.Fatalf("published contract drifted from %s\nproduced:\n%s\ngolden:\n%s", goldenPath, produced, golden)
+	}
+}
+
+func assertNoCredentialMaterial(t *testing.T, metadata any) {
+	t.Helper()
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range credentialMarkers {
+		if strings.Contains(string(encoded), marker) {
+			t.Fatalf("auth metadata leaked credential material %q: %s", marker, encoded)
+		}
+	}
+}
+
+func TestPartiallyPopulatedObservationsStayBounded(t *testing.T) {
+	for name, observation := range map[string]cursor.Quota{
+		"unparseable boundaries": {Available: true, WindowStart: "soon", WindowEnd: "later", Used: 1, Limit: 10, Remaining: 9},
+		"absent boundaries":      {Available: true, Used: 1, Limit: 10, Remaining: 9},
+		"negative used":          {Available: true, WindowStart: "2026-08-01T00:00:00Z", WindowEnd: "2026-09-01T00:00:00Z", Used: -1, Limit: 10, Remaining: 9},
+		"negative limit":         {Available: true, WindowStart: "2026-08-01T00:00:00Z", WindowEnd: "2026-09-01T00:00:00Z", Used: 1, Limit: -10, Remaining: 9},
+		"negative remaining":     {Available: true, WindowStart: "2026-08-01T00:00:00Z", WindowEnd: "2026-09-01T00:00:00Z", Used: 1, Limit: 10, Remaining: -9},
+	} {
+		t.Run(name, func(t *testing.T) {
+			contract := buildPluginQuotaContract(cursor.ProviderID, cursor.Metadata{
+				SubscriptionQuotaAvailable: true, Quota: observation,
+			})
+			if contract.Availability != pluginQuotaUnavailable || len(contract.Windows) != 0 {
+				t.Fatalf("a window without a usable boundary must not be published: %#v", contract)
+			}
+			if contract.Schema != PluginQuotaSchema || contract.Version != PluginQuotaVersion {
+				t.Fatalf("a bounded contract must stay identifiable: %#v", contract)
+			}
+		})
+	}
+}
+
+func TestPluginQuotaContractMapsCodexBarWindows(t *testing.T) {
+	contract := buildPluginQuotaContract(cursor.ProviderID, cursor.Metadata{
+		SubscriptionQuotaAvailable: true,
+		ObservedAt:                 "2026-08-27T18:00:00Z",
+		Quota: cursor.Quota{
+			Available: true,
+			Windows: []cursor.QuotaWindow{
+				{
+					ID: "total", Label: "Total", Kind: "billing", Unit: "cents",
+					Used: 37146, Limit: 40000, Remaining: 2854, HasCounts: true,
+					UsedPercent: 10.61, HasUsedPercent: true,
+					WindowStart: "2026-08-19T17:00:53.000Z", WindowEnd: "2026-09-19T17:00:53.000Z",
+				},
+				{
+					ID: "cursor", Label: "Cursor", Kind: "billing", UsedPercent: 10.84, HasUsedPercent: true,
+					WindowStart: "2026-08-19T17:00:53.000Z", WindowEnd: "2026-09-19T17:00:53.000Z",
+				},
+				{
+					ID: "third_party", Label: "Third Party", Kind: "billing", UsedPercent: 9.28, HasUsedPercent: true,
+					WindowStart: "2026-08-19T17:00:53.000Z", WindowEnd: "2026-09-19T17:00:53.000Z",
+				},
+				{
+					ID: "grok_bot", Label: "Grok Bot", Kind: "weekly", UsedPercent: 0.09, HasUsedPercent: true,
+					WindowStart: "2026-08-26T17:35:14.907Z", WindowEnd: "2026-09-02T17:35:14.907Z",
+				},
+			},
+			Spend: &cursor.QuotaSpend{
+				HasMetered: true, MeteredCents: 98655, HasToday: true, TodayCents: 458,
+				HasPeriod: true, PeriodCents: 124717, PeriodDays: 30,
+			},
+			Daily: []cursor.QuotaDaily{
+				{Date: "2026-08-26", CostCents: 1200},
+				{Date: "2026-08-27", CostCents: 19800},
+			},
+		},
+	})
+	if contract.Availability != pluginQuotaAvailable || len(contract.Windows) != 4 {
+		t.Fatalf("contract = %#v", contract)
+	}
+	ids := make([]string, 0, len(contract.Windows))
+	for _, window := range contract.Windows {
+		ids = append(ids, window.ID)
+		if window.UsedPercent == nil || window.ResetAt == "" {
+			t.Fatalf("window %q is incomplete: %#v", window.ID, window)
+		}
+	}
+	if contract.Spend == nil || contract.Spend.MeteredCents == nil || *contract.Spend.MeteredCents != 98655 {
+		t.Fatalf("spend = %#v", contract.Spend)
+	}
+	if len(contract.Daily) != 2 || contract.Daily[0].Date != "2026-08-26" {
+		t.Fatalf("daily = %#v", contract.Daily)
+	}
+	if strings.Join(ids, ",") != "total,cursor,third_party,grok_bot" {
+		t.Fatalf("window ids = %v", ids)
+	}
+	if contract.Windows[0].Unit != "cents" || contract.Windows[0].Used == nil || *contract.Windows[0].Used != 37146 {
+		t.Fatalf("total window = %#v", contract.Windows[0])
+	}
+	if contract.Windows[1].Used != nil || contract.Windows[2].Used != nil {
+		t.Fatalf("split windows must stay percent-only: %#v %#v", contract.Windows[1], contract.Windows[2])
+	}
+}
+
+func TestUnlimitedPlansPublishNoUtilizationPercentage(t *testing.T) {
+	contract := buildPluginQuotaContract(cursor.ProviderID, cursor.Metadata{
+		SubscriptionQuotaAvailable: true,
+		Quota: cursor.Quota{
+			Available: true, Unlimited: true, LimitType: "monthly",
+			WindowStart: "2026-08-01T00:00:00Z", WindowEnd: "2026-09-01T00:00:00Z",
+		},
+	})
+	if len(contract.Windows) != 1 {
+		t.Fatalf("an unlimited plan still has a window: %#v", contract)
+	}
+	if contract.Windows[0].UsedPercent != nil || !contract.Windows[0].Unlimited {
+		t.Fatalf("an unlimited plan has no meaningful utilization: %#v", contract.Windows[0])
+	}
 }

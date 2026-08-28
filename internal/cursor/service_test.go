@@ -195,13 +195,38 @@ func TestServiceClassifiesCancellationAndProcessFailureForFailover(t *testing.T)
 	}
 }
 
+type staticQuotaProvider struct{ quota Quota }
+
+func (p staticQuotaProvider) Fetch(context.Context, QuotaTarget) (Quota, error) { return p.quota, nil }
+
+func TestMetadataReportsSubscriptionQuotaWhenTheProfileObservationSucceeds(t *testing.T) {
+	service, _ := testService(t)
+	service.quota = staticQuotaProvider{quota: Quota{
+		Available: true, WindowStart: "2026-08-01T00:00:00Z", WindowEnd: "2026-09-01T00:00:00Z",
+		MembershipType: "pro", LimitType: "monthly", Used: 125, Limit: 500, Remaining: 375,
+	}}
+	metadata, err := service.Metadata(context.Background(), "cursor-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !metadata.SubscriptionQuotaAvailable || metadata.ExactSubscriptionQuota == nil || *metadata.ExactSubscriptionQuota != 375 {
+		t.Fatalf("quota metadata = %#v", metadata)
+	}
+	if metadata.Quota.WindowStart == "" || metadata.Quota.Limit != 500 || metadata.Quota.Used != 125 {
+		t.Fatalf("quota data = %#v", metadata.Quota)
+	}
+	if metadata.ObservedAt == "" {
+		t.Fatal("a successful observation must record its observation time")
+	}
+}
+
 func TestMetadataReportsObservedUseNotSubscriptionQuota(t *testing.T) {
 	service, _ := testService(t)
 	_, err := service.Execute(context.Background(), Request{AuthID: "cursor-a", ConversationID: "usage", Prompt: "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	metadata, err := service.Metadata("cursor-a")
+	metadata, err := service.Metadata(context.Background(), "cursor-a")
 	if err != nil {
 		t.Fatal(err)
 	}

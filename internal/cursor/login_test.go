@@ -156,6 +156,12 @@ func TestRegressionCursorAuthUsesPerProfileXDGConfigHome(t *testing.T) {
 		if values["XDG_CONFIG_HOME"] != profile {
 			t.Fatalf("%s XDG_CONFIG_HOME = %q, want %q", name, values["XDG_CONFIG_HOME"], profile)
 		}
+		if values["HOME"] != profile {
+			t.Fatalf("%s HOME = %q, want %q", name, values["HOME"], profile)
+		}
+		if values["AGENT_CLI_CREDENTIAL_STORE"] != "file" {
+			t.Fatalf("%s AGENT_CLI_CREDENTIAL_STORE = %q, want file", name, values["AGENT_CLI_CREDENTIAL_STORE"])
+		}
 	}
 }
 

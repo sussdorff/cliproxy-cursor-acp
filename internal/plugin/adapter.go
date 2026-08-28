@@ -271,6 +271,17 @@ func (a *Adapter) authData(ctx context.Context, account cursor.Account) pluginap
 			available, _ = a.prober.Probe(ctx, snapshot)
 		}
 		current, _, err := a.service.AccountWithMetadata(snapshot.AuthID)
+		if err != nil {
+			break
+		}
+		if current != snapshot {
+			account = current
+			continue
+		}
+		// The quota observation also runs outside the service lock, so the
+		// account is verified again before its consumption is published.
+		metadata = a.service.MetadataForAccount(ctx, snapshot, metadata)
+		current, _, err = a.service.AccountWithMetadata(snapshot.AuthID)
 		if err == nil && current == snapshot {
 			return authDataFromSnapshot(snapshot, metadata, available, true)
 		}
@@ -298,12 +309,23 @@ func authDataFromSnapshot(account cursor.Account, metadata cursor.Metadata, avai
 	if stable && available {
 		status = "available"
 	}
+	// Quota availability is reported independently of credential availability:
+	// an unobservable subscription must never remove an account from rotation.
+	exactQuota := any(nil)
+	if metadata.ExactSubscriptionQuota != nil {
+		exactQuota = *metadata.ExactSubscriptionQuota
+	}
 	return pluginapi.AuthData{
 		Provider: cursor.ProviderID, ID: account.AuthID, FileName: account.AuthID + ".json",
 		Label: account.Label, Prefix: "cursor", Disabled: !available, StorageJSON: storage,
 		Metadata: map[string]any{
-			"status": status, "subscription_quota_available": false, "exact_subscription_quota": nil,
+			"status": status, "subscription_quota_available": metadata.SubscriptionQuotaAvailable, "exact_subscription_quota": exactQuota,
 			"observed_input_tokens": metadata.ObservedInputTokens, "observed_output_tokens": metadata.ObservedOutputTokens,
+			// profile_dir must be present so a host metadata merge cannot keep a
+			// stale path from the previous login of the same AuthID. Quota
+			// observation reads only this profile.
+			"profile_dir":          account.ProfileDir,
+			PluginQuotaMetadataKey: buildPluginQuotaContract(cursor.ProviderID, metadata),
 		},
 		Attributes: map[string]string{"model": "cursor/" + account.Model},
 	}

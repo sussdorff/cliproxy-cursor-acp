@@ -266,10 +266,12 @@ See [docs/security.md](docs/security.md) for the full boundary and
   is returned after it completes.
 - **No preflight token counting.** `CountTokens` returns an explicit unsupported
   error.
-- **No exact subscription quota.** `subscription_quota_available` is always
-  `false` and `exact_subscription_quota` is always null, because the official CLI
-  publishes no numeric remaining balance. The plugin reports ACP-observed token
-  counters, which are not a paid balance.
+- **Best-effort subscription quota.** The plugin publishes the account-scoped
+  billing-cycle window it can observe from the managed profile, as the generic
+  contract in [docs/plugin-quota-contract.md](docs/plugin-quota-contract.md).
+  When the profile cannot be observed, the contract reports `unavailable` and the
+  account stays usable. ACP-observed token counters are reported separately and
+  are not a paid balance.
 - **No raw HTTP bridging** to Cursor endpoints.
 - **linux/amd64 releases only.**
 
