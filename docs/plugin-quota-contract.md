@@ -24,9 +24,13 @@ lifts only `priority` and `note` out of `AuthData.Metadata`; it emits no
 `metadata` object at all. This was checked against CLIProxyAPI `v7.2.141` (the
 pinned version) and `v7.2.143`.
 
-Displaying this contract therefore requires a CLIProxyAPI build that projects
-the plugin quota onto the list entry as `metadata.plugin_quota`. The host does
-not pass the payload through; it rebuilds it from an allowlist:
+Displaying this contract therefore requires two downstream builds that this
+plugin repository does not ship: a CLIProxyAPI **host patch** that projects
+`metadata.plugin_quota` on the list (and serves refresh-quota), and a CPAMP
+**image fork** that renders it. Exact remotes and rebuild steps are in
+[quota-stack-origins.md](quota-stack-origins.md).
+
+The host does not pass the payload through; it rebuilds it from an allowlist:
 
 - only `plugin_quota` is projected; every other metadata key, known or unknown,
   stays omitted, so tokens, cookies, `access_token`, `refresh_token`, raw

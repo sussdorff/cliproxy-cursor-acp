@@ -36,14 +36,19 @@ Cursor
 - **[CPA Manager Plus](https://github.com/seakee/CPA-Manager-Plus)** (CPAMP) is
   the management UI used throughout this guide. It renders the plugin store, the
   configuration panel, and an OAuth login card for this provider automatically.
+  The **Quota** tab for this plugin is not in the stock seakee image; see
+  [docs/quota-stack-origins.md](docs/quota-stack-origins.md).
 - **The official [Cursor Agent CLI](https://cursor.com/docs/cli)** owns every
   credential. Each account gets its own private `CURSOR_CONFIG_DIR` created by
   this plugin with mode `0700`; the plugin only ever passes that path to the CLI.
 
 ## Quickstart for an operator
 
-The whole flow happens in a browser. You never enter the container and never
-build a custom CLIProxyAPI image.
+The chat and login flow happens in a browser against stock CLIProxyAPI plus
+this plugin. You do not need a custom host image for `cursor/auto` requests.
+The Accounts **Quota** tab is a different stack: it needs the CLIProxyAPI
+**host patch** and the CPAMP **image fork** documented in
+[docs/quota-stack-origins.md](docs/quota-stack-origins.md).
 
 ### 1. Enable plugins and add this store source
 
@@ -267,11 +272,14 @@ See [docs/security.md](docs/security.md) for the full boundary and
 - **No preflight token counting.** `CountTokens` returns an explicit unsupported
   error.
 - **Best-effort subscription quota.** The plugin publishes the account-scoped
-  billing-cycle window it can observe from the managed profile, as the generic
+  windows and spend it can observe from the managed profile, as the generic
   contract in [docs/plugin-quota-contract.md](docs/plugin-quota-contract.md).
   When the profile cannot be observed, the contract reports `unavailable` and the
-  account stays usable. ACP-observed token counters are reported separately and
-  are not a paid balance.
+  account stays usable. A manager UI only sees that payload on a patched
+  CLIProxyAPI host and a forked CPAMP image; recover those remotes from
+  [docs/quota-stack-origins.md](docs/quota-stack-origins.md).
+  ACP-observed token counters are reported separately and are not a paid
+  balance.
 - **No raw HTTP bridging** to Cursor endpoints.
 - **linux/amd64 releases only.**
 
@@ -295,7 +303,10 @@ CLIProxyAPI.
 ## References
 
 - CLIProxyAPI: <https://github.com/router-for-me/CLIProxyAPI>
+- CLIProxyAPI host patch (quota list + refresh): <https://github.com/sussdorff/CLIProxyAPI>
 - CPA Manager Plus: <https://github.com/seakee/CPA-Manager-Plus>
+- CPA Manager Plus image fork (plugin Quota tab): <https://github.com/sussdorff/CPA-Manager-Plus>
+- Recovering the quota stack: [docs/quota-stack-origins.md](docs/quota-stack-origins.md)
 - Official Cursor CLI documentation: <https://cursor.com/docs/cli>
 - Agent Client Protocol: <https://agentclientprotocol.com/>
 - ACP Go SDK: <https://github.com/coder/acp-go-sdk>
