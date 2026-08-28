@@ -7,18 +7,30 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testAccessToken = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ3b3Jrb3N8Y3Vyc29yLXVzZXIiLCJleHAiOjQxMDI0NDQ4MDB9.signature"
 
 func writeProfileToken(t *testing.T, profile string) {
 	t.Helper()
+	writeProfileTokenAt(t, profile, "cursor")
+}
+
+func writeDarwinAgentProfileToken(t *testing.T, profile string) {
+	t.Helper()
+	writeProfileTokenAt(t, profile, ".cursor")
+}
+
+func writeProfileTokenAt(t *testing.T, profile, store string) {
+	t.Helper()
 	if err := os.Chmod(profile, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	directory := filepath.Join(profile, "cursor")
+	directory := filepath.Join(profile, store)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +71,11 @@ func TestUsageSummaryMapsCurrentBillingWindowWithoutLeakingCredentials(t *testin
 		t.Fatalf("profile identity was not accepted: %v", err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/dashboard/get-sand-usage-status" ||
+			request.URL.Path == "/api/dashboard/get-filtered-usage-events" {
+			writer.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if request.URL.Path != "/api/usage-summary" {
 			t.Fatalf("path = %q", request.URL.Path)
 		}
@@ -85,6 +102,111 @@ func TestUsageSummaryMapsCurrentBillingWindowWithoutLeakingCredentials(t *testin
 	}
 	if quota.WindowStart != "2026-08-01T00:00:00.000Z" || quota.WindowEnd != "2026-09-01T00:00:00.000Z" || quota.MembershipType != "pro" {
 		t.Fatalf("quota window = %#v", quota)
+	}
+	if len(quota.Windows) != 1 || quota.Windows[0].ID != "total" {
+		t.Fatalf("quota windows = %#v, want the included-plan total", quota.Windows)
+	}
+}
+
+func TestUsageSummaryMapsCodexBarWindows(t *testing.T) {
+	target := newQuotaProfile(t)
+	writeProfileToken(t, target.ProfileDir)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/usage-summary":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{
+				"billingCycleStart":"2026-08-19T17:00:53.000Z",
+				"billingCycleEnd":"2026-09-19T17:00:53.000Z",
+				"membershipType":"ultra",
+				"limitType":"user",
+				"individualUsage":{"plan":{
+					"enabled":true,"used":37146,"limit":40000,"remaining":2854,
+					"autoPercentUsed":10.835,"apiPercentUsed":9.282,"totalPercentUsed":10.613
+				}}
+			}`))
+		case "/api/dashboard/get-filtered-usage-events":
+			writer.WriteHeader(http.StatusNotFound)
+		case "/api/dashboard/get-sand-usage-status":
+			if request.Method != http.MethodPost || request.Header.Get("Origin") == "" {
+				t.Fatalf("sand usage request was incomplete: %s origin=%q", request.Method, request.Header.Get("Origin"))
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{
+				"usagePercent":0.094,"nextResetTimestampUtc":"2026-09-02T17:35:14.907Z",
+				"currentPeriodStart":"2026-08-26T17:35:14.907Z",
+				"hasAvailableUsage":true,"hasNonZeroIncludedLimit":true
+			}`))
+		default:
+			t.Fatalf("path = %q", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	quota, err := newUsageSummaryClient(server.URL, server.Client()).Fetch(context.Background(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !quota.Available || quota.Remaining != 2854 {
+		t.Fatalf("quota = %#v", quota)
+	}
+	ids := make([]string, 0, len(quota.Windows))
+	for _, window := range quota.Windows {
+		ids = append(ids, window.ID)
+	}
+	if strings.Join(ids, ",") != "total,cursor,third_party,grok_bot" {
+		t.Fatalf("window ids = %v", ids)
+	}
+	if !quota.Windows[1].HasUsedPercent || quota.Windows[1].UsedPercent != 10.84 {
+		t.Fatalf("cursor window = %#v", quota.Windows[1])
+	}
+	if !quota.Windows[3].HasUsedPercent || quota.Windows[3].UsedPercent != 0.09 {
+		t.Fatalf("grok window = %#v", quota.Windows[3])
+	}
+}
+
+func TestUsageEventsAggregateCodexBarSpend(t *testing.T) {
+	now := time.Date(2026, time.August, 27, 18, 0, 0, 0, time.UTC)
+	today := strconv.FormatInt(now.UnixMilli(), 10)
+	yesterday := strconv.FormatInt(now.Add(-24*time.Hour).UnixMilli(), 10)
+	body := []byte(`{"totalUsageEventsCount":2,"usageEventsDisplay":[
+		{"timestamp":"` + yesterday + `","chargedCents":100.4,"tokenUsage":{"inputTokens":10,"outputTokens":5,"cacheReadTokens":0,"totalCents":200}},
+		{"timestamp":"` + today + `","chargedCents":50.4,"tokenUsage":{"inputTokens":20,"outputTokens":10,"cacheReadTokens":70,"totalCents":80}}
+	]}`)
+	events, total, ok := parseUsageEventsPage(body)
+	if !ok || total != 2 || len(events) != 2 {
+		t.Fatalf("page = %v %d %#v", ok, total, events)
+	}
+	spend, daily, ok := aggregateUsageEvents(events, now)
+	if !ok || spend == nil || !spend.HasMetered || spend.MeteredCents != 150 {
+		t.Fatalf("spend = %#v", spend)
+	}
+	if !spend.HasToday || spend.TodayCents != 80 || spend.PeriodCents != 280 {
+		t.Fatalf("period = %#v", spend)
+	}
+	if !spend.HasLatest || spend.LatestTokens != 100 || spend.PeriodTokens != 115 {
+		t.Fatalf("tokens = %#v", spend)
+	}
+	if len(daily) != 2 || daily[0].CostCents != 200 || daily[1].CostCents != 80 {
+		t.Fatalf("daily = %#v", daily)
+	}
+}
+
+func TestSandUsageIsOmittedWhenThereIsNoIncludedBotAllowance(t *testing.T) {
+	if window, ok := parseSandUsage([]byte(`{
+		"usagePercent":12,"nextResetTimestampUtc":"2026-09-02T17:35:14.907Z",
+		"currentPeriodStart":"2026-08-26T17:35:14.907Z","hasNonZeroIncludedLimit":false
+	}`)); ok {
+		t.Fatalf("a plan without included Bot usage published a window: %#v", window)
+	}
+}
+
+func TestUsageSummaryReadsDarwinAgentFileStore(t *testing.T) {
+	target := newQuotaProfile(t)
+	writeDarwinAgentProfileToken(t, target.ProfileDir)
+	token, err := readProfileAccessToken(target)
+	if err != nil || token != testAccessToken {
+		t.Fatalf("darwin agent file-store token was not accepted: %v", err)
 	}
 }
 

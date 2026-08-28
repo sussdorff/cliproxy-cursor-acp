@@ -83,9 +83,31 @@ visible to a manager UI.
 ```
 
 `internal/plugin/testdata/plugin_quota_cursor_v1.json` is the golden fixture for
-this shape. It is asserted by `internal/plugin/adapter_test.go` and is consumed
-unchanged by the CPA-Manager-Plus parser test, so a producer change that drifts
-from the contract fails on both sides.
+the minimal single-window shape. It is asserted by `internal/plugin/adapter_test.go`
+and is consumed unchanged by the CPA-Manager-Plus parser test, so a producer
+change that drifts from the contract fails on both sides.
+
+A live Cursor observation can publish several windows in that same schema.
+They follow CodexBar's included-plan mapping from
+`GET https://cursor.com/api/usage-summary` and, when the account has an included
+Bot allowance, `POST https://cursor.com/api/dashboard/get-sand-usage-status`:
+
+| `id` | Label | Source |
+|---|---|---|
+| `total` | Total | `individualUsage.plan` used/limit/remaining (cents on token plans) and `totalPercentUsed` |
+| `cursor` | Cursor | `plan.autoPercentUsed` (Auto + Composer) |
+| `third_party` | Third Party | `plan.apiPercentUsed` (named / API models) |
+| `grok_bot` | Grok Bot | weekly Sand usage; omitted when `hasNonZeroIncludedLimit` is false |
+
+Optional `spend` and `daily` come from
+`POST https://cursor.com/api/dashboard/get-filtered-usage-events` over the last
+30 days. `spend.metered_cents` is the plan deduction (`chargedCents`);
+`today_cents` / `period_cents` / `daily[].cost_cents` are vendor list-price
+(`tokenUsage.totalCents`). Raw events never leave the plugin.
+
+A consumer treats an observation older than `ttl_seconds` as stale. This
+producer uses a six-hour freshness budget so a missed host refresh does not
+blank the Quota tab.
 
 ## Field rules
 

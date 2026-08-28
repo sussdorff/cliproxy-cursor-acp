@@ -321,6 +321,10 @@ func authDataFromSnapshot(account cursor.Account, metadata cursor.Metadata, avai
 		Metadata: map[string]any{
 			"status": status, "subscription_quota_available": metadata.SubscriptionQuotaAvailable, "exact_subscription_quota": exactQuota,
 			"observed_input_tokens": metadata.ObservedInputTokens, "observed_output_tokens": metadata.ObservedOutputTokens,
+			// profile_dir must be present so a host metadata merge cannot keep a
+			// stale path from the previous login of the same AuthID. Quota
+			// observation reads only this profile.
+			"profile_dir":          account.ProfileDir,
 			PluginQuotaMetadataKey: buildPluginQuotaContract(cursor.ProviderID, metadata),
 		},
 		Attributes: map[string]string{"model": "cursor/" + account.Model},

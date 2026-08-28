@@ -978,7 +978,10 @@ func TestAuthMetadataPublishesVersionedGenericQuotaContract(t *testing.T) {
 	if !auth.Disabled && auth.Metadata["status"] != "available" {
 		t.Fatalf("a published quota contract must not change credential availability: %#v", auth.Metadata)
 	}
-	assertNoCredentialMaterial(t, auth.Metadata)
+	if profileDir, _ := auth.Metadata["profile_dir"].(string); strings.TrimSpace(profileDir) == "" {
+		t.Fatal("auth metadata must carry profile_dir so a host merge cannot keep a stale login path")
+	}
+	assertNoCredentialMaterial(t, auth.Metadata[PluginQuotaMetadataKey])
 }
 
 func TestAuthMetadataPublishesBoundedUnavailableQuotaContract(t *testing.T) {
@@ -1006,7 +1009,7 @@ func TestAuthMetadataPublishesBoundedUnavailableQuotaContract(t *testing.T) {
 	if auth.Disabled {
 		t.Fatal("an unobservable quota must not disable the credential")
 	}
-	assertNoCredentialMaterial(t, auth.Metadata)
+	assertNoCredentialMaterial(t, auth.Metadata[PluginQuotaMetadataKey])
 }
 
 func TestPluginQuotaContractMatchesThePublishedGoldenFixture(t *testing.T) {
@@ -1032,7 +1035,7 @@ func TestPluginQuotaContractMatchesThePublishedGoldenFixture(t *testing.T) {
 	}
 }
 
-func assertNoCredentialMaterial(t *testing.T, metadata map[string]any) {
+func assertNoCredentialMaterial(t *testing.T, metadata any) {
 	t.Helper()
 	encoded, err := json.Marshal(metadata)
 	if err != nil {
@@ -1064,6 +1067,69 @@ func TestPartiallyPopulatedObservationsStayBounded(t *testing.T) {
 				t.Fatalf("a bounded contract must stay identifiable: %#v", contract)
 			}
 		})
+	}
+}
+
+func TestPluginQuotaContractMapsCodexBarWindows(t *testing.T) {
+	contract := buildPluginQuotaContract(cursor.ProviderID, cursor.Metadata{
+		SubscriptionQuotaAvailable: true,
+		ObservedAt:                 "2026-08-27T18:00:00Z",
+		Quota: cursor.Quota{
+			Available: true,
+			Windows: []cursor.QuotaWindow{
+				{
+					ID: "total", Label: "Total", Kind: "billing", Unit: "cents",
+					Used: 37146, Limit: 40000, Remaining: 2854, HasCounts: true,
+					UsedPercent: 10.61, HasUsedPercent: true,
+					WindowStart: "2026-08-19T17:00:53.000Z", WindowEnd: "2026-09-19T17:00:53.000Z",
+				},
+				{
+					ID: "cursor", Label: "Cursor", Kind: "billing", UsedPercent: 10.84, HasUsedPercent: true,
+					WindowStart: "2026-08-19T17:00:53.000Z", WindowEnd: "2026-09-19T17:00:53.000Z",
+				},
+				{
+					ID: "third_party", Label: "Third Party", Kind: "billing", UsedPercent: 9.28, HasUsedPercent: true,
+					WindowStart: "2026-08-19T17:00:53.000Z", WindowEnd: "2026-09-19T17:00:53.000Z",
+				},
+				{
+					ID: "grok_bot", Label: "Grok Bot", Kind: "weekly", UsedPercent: 0.09, HasUsedPercent: true,
+					WindowStart: "2026-08-26T17:35:14.907Z", WindowEnd: "2026-09-02T17:35:14.907Z",
+				},
+			},
+			Spend: &cursor.QuotaSpend{
+				HasMetered: true, MeteredCents: 98655, HasToday: true, TodayCents: 458,
+				HasPeriod: true, PeriodCents: 124717, PeriodDays: 30,
+			},
+			Daily: []cursor.QuotaDaily{
+				{Date: "2026-08-26", CostCents: 1200},
+				{Date: "2026-08-27", CostCents: 19800},
+			},
+		},
+	})
+	if contract.Availability != pluginQuotaAvailable || len(contract.Windows) != 4 {
+		t.Fatalf("contract = %#v", contract)
+	}
+	ids := make([]string, 0, len(contract.Windows))
+	for _, window := range contract.Windows {
+		ids = append(ids, window.ID)
+		if window.UsedPercent == nil || window.ResetAt == "" {
+			t.Fatalf("window %q is incomplete: %#v", window.ID, window)
+		}
+	}
+	if contract.Spend == nil || contract.Spend.MeteredCents == nil || *contract.Spend.MeteredCents != 98655 {
+		t.Fatalf("spend = %#v", contract.Spend)
+	}
+	if len(contract.Daily) != 2 || contract.Daily[0].Date != "2026-08-26" {
+		t.Fatalf("daily = %#v", contract.Daily)
+	}
+	if strings.Join(ids, ",") != "total,cursor,third_party,grok_bot" {
+		t.Fatalf("window ids = %v", ids)
+	}
+	if contract.Windows[0].Unit != "cents" || contract.Windows[0].Used == nil || *contract.Windows[0].Used != 37146 {
+		t.Fatalf("total window = %#v", contract.Windows[0])
+	}
+	if contract.Windows[1].Used != nil || contract.Windows[2].Used != nil {
+		t.Fatalf("split windows must stay percent-only: %#v %#v", contract.Windows[1], contract.Windows[2])
 	}
 }
 

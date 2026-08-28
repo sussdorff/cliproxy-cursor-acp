@@ -4,7 +4,7 @@
   "provider": "cursor-acp",
   "availability": "available",
   "observed_at": "2026-08-26T09:15:00Z",
-  "ttl_seconds": 900,
+  "ttl_seconds": 21600,
   "windows": [
     {
       "id": "subscription",

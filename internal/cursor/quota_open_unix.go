@@ -28,9 +28,19 @@ func openQuotaCredential(target QuotaTarget) (*os.File, error) {
 		return nil, quotaUnavailable()
 	}
 	defer unix.Close(profileFD)
-	cursorFD, err := openPrivateDirectoryAt(profileFD, "cursor")
+	for _, store := range []string{"cursor", ".cursor"} {
+		credential, err := openQuotaAuthJSON(profileFD, store)
+		if err == nil {
+			return credential, nil
+		}
+	}
+	return nil, quotaUnavailable()
+}
+
+func openQuotaAuthJSON(profileFD int, storeName string) (*os.File, error) {
+	cursorFD, err := openPrivateDirectoryAt(profileFD, storeName)
 	if err != nil {
-		return nil, quotaUnavailable()
+		return nil, err
 	}
 	defer unix.Close(cursorFD)
 	authFD, err := unix.Openat(cursorFD, "auth.json", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)

@@ -205,26 +205,33 @@ func (f CommandFactory) Start(ctx context.Context, account Account) (ACPClient, 
 }
 
 func isolatedEnv(base []string, profileDir string) []string {
-	allowed := map[string]bool{"PATH": true, "HOME": true, "TMPDIR": true, "TERM": true, "NO_COLOR": true, "LANG": true, "LC_ALL": true}
+	allowed := map[string]bool{"PATH": true, "TMPDIR": true, "TERM": true, "NO_COLOR": true, "LANG": true, "LC_ALL": true}
 	env := make([]string, 0, len(base)+1)
 	for _, entry := range base {
 		name, _, ok := strings.Cut(entry, "=")
-		if ok && allowed[name] && name != "CURSOR_API_KEY" && name != "CURSOR_CONFIG_DIR" {
+		if ok && allowed[name] && name != "CURSOR_API_KEY" && name != "CURSOR_CONFIG_DIR" && name != "HOME" && name != "XDG_CONFIG_HOME" && name != "AGENT_CLI_CREDENTIAL_STORE" {
 			env = append(env, entry)
 		}
 	}
 	if len(base) == 0 {
 		for _, entry := range os.Environ() {
 			name, _, _ := strings.Cut(entry, "=")
-			if allowed[name] && name != "CURSOR_API_KEY" && name != "CURSOR_CONFIG_DIR" {
+			if allowed[name] && name != "CURSOR_API_KEY" && name != "CURSOR_CONFIG_DIR" && name != "HOME" && name != "XDG_CONFIG_HOME" && name != "AGENT_CLI_CREDENTIAL_STORE" {
 				env = append(env, entry)
 			}
 		}
 	}
-	// Cursor keeps its authentication below XDG_CONFIG_HOME, independently of
-	// CURSOR_CONFIG_DIR. Pin both to the managed account profile so a later
-	// login cannot replace the credentials used by another account.
-	return append(env, "CURSOR_CONFIG_DIR="+profileDir, "XDG_CONFIG_HOME="+profileDir)
+	// Cursor 2026 on Darwin stores the session token in the login keychain or
+	// at $HOME/.cursor/auth.json. The host HOME and the default keychain store
+	// are not the managed profile, so quota observation never sees a file.
+	// Pin HOME and the file credential store to the profile so login writes
+	// <profile>/.cursor/auth.json and usage-summary can read it.
+	return append(env,
+		"HOME="+profileDir,
+		"CURSOR_CONFIG_DIR="+profileDir,
+		"XDG_CONFIG_HOME="+profileDir,
+		"AGENT_CLI_CREDENTIAL_STORE=file",
+	)
 }
 
 type acpProcess struct {

@@ -382,7 +382,18 @@ func (l *Login) Poll(ctx context.Context, state string) (LoginResult, error) {
 	for _, name := range []string{loginStdoutFile, loginStderrFile} {
 		_ = os.Remove(filepath.Join(session.profileDir, name))
 	}
+	tightenQuotaCredentialMode(session.profileDir)
 	return LoginResult{Authenticated: true, Message: "Cursor account authenticated", Account: account, Tier: tier, Version: version}, nil
+}
+
+func tightenQuotaCredentialMode(profileDir string) {
+	for _, store := range []string{"cursor", ".cursor"} {
+		path := filepath.Join(profileDir, store, "auth.json")
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			_ = os.Chmod(path, 0o600)
+			_ = os.Chmod(filepath.Dir(path), 0o700)
+		}
+	}
 }
 
 // Close terminates every unfinished login and removes its private profile. It
