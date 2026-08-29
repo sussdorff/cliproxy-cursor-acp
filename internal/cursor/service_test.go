@@ -548,16 +548,12 @@ func TestPendingTurnCancellationTimeoutAndShutdownCleanState(t *testing.T) {
 			if _, err := service.RegisterAccount(Account{AuthID: "cursor-a", ProfileDir: profiles + "/a", Model: "auto"}); err != nil {
 				t.Fatal(err)
 			}
-			ctx := context.Background()
-			var cancel context.CancelFunc
-			if mode == "caller-cancel" {
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
-			}
-			if mode == "shutdown" {
+			if mode == "shutdown" || mode == "caller-cancel" {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
 				done := make(chan error, 1)
 				go func() {
-					_, startErr := service.StartTurn(context.Background(), ToolTurnRequest{Request: Request{AuthID: "cursor-a", ConversationID: mode, Prompt: "wait"}, Tools: ToolNames{ToolRead: "read"}})
+					_, startErr := service.StartTurn(ctx, ToolTurnRequest{Request: Request{AuthID: "cursor-a", ConversationID: mode, Prompt: "wait"}, Tools: ToolNames{ToolRead: "read"}})
 					done <- startErr
 				}()
 				eventually(t, time.Second, func() bool {
@@ -565,24 +561,59 @@ func TestPendingTurnCancellationTimeoutAndShutdownCleanState(t *testing.T) {
 					defer service.mu.Unlock()
 					return service.pendingTurns[mode] != nil
 				})
-				if err := service.Close(); err != nil {
-					t.Fatal(err)
+				if mode == "shutdown" {
+					if err := service.Close(); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					cancel()
 				}
 				if err := <-done; err == nil {
-					t.Fatal("shutdown did not unblock pending turn")
+					t.Fatalf("%s did not unblock pending turn", mode)
 				}
 			} else {
-				if _, err := service.StartTurn(ctx, ToolTurnRequest{Request: Request{AuthID: "cursor-a", ConversationID: mode, Prompt: "wait"}, Tools: ToolNames{ToolRead: "read"}}); err == nil {
+				if _, err := service.StartTurn(context.Background(), ToolTurnRequest{Request: Request{AuthID: "cursor-a", ConversationID: mode, Prompt: "wait"}, Tools: ToolNames{ToolRead: "read"}}); err == nil {
 					t.Fatalf("%s did not stop pending turn", mode)
 				}
-				_ = service.Close()
 			}
 			service.mu.Lock()
-			defer service.mu.Unlock()
-			if len(service.pendingTurns) != 0 || len(service.pendingCalls) != 0 || len(service.sem) != 0 {
-				t.Fatalf("pending state after %s: turns=%d calls=%d permits=%d", mode, len(service.pendingTurns), len(service.pendingCalls), len(service.sem))
+			turns, calls, permits := len(service.pendingTurns), len(service.pendingCalls), len(service.sem)
+			service.mu.Unlock()
+			if turns != 0 || calls != 0 || permits != 0 {
+				t.Fatalf("pending state after %s: turns=%d calls=%d permits=%d", mode, turns, calls, permits)
 			}
+			_ = service.Close()
 		})
+	}
+}
+
+func TestCloseWaitsForTurnCleanupAndPermitRelease(t *testing.T) {
+	service := testBridgeServiceWithMaxConcurrent(t, 1)
+	turnCtx, cancel := context.WithCancel(context.Background())
+	turn := &pendingToolTurn{authID: "cursor-a", conversationID: "shutdown-barrier", ctx: turnCtx, cancel: cancel, done: make(chan struct{})}
+	service.sem <- struct{}{}
+	service.mu.Lock()
+	service.pendingTurns[turn.conversationID] = turn
+	service.mu.Unlock()
+
+	closed := make(chan error, 1)
+	go func() { closed <- service.Close() }()
+	<-turnCtx.Done()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned before turn cleanup: %v", err)
+	default:
+	}
+
+	service.completeToolTurn(turn)
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	service.mu.Lock()
+	turns, calls, permits := len(service.pendingTurns), len(service.pendingCalls), len(service.sem)
+	service.mu.Unlock()
+	if turns != 0 || calls != 0 || permits != 0 {
+		t.Fatalf("state after synchronized Close: turns=%d calls=%d permits=%d", turns, calls, permits)
 	}
 }
 

@@ -85,7 +85,9 @@ type pendingToolTurn struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	events         chan toolTurnOutcome
+	done           chan struct{}
 	admissionOnce  sync.Once
+	completionOnce sync.Once
 }
 
 func (t *pendingToolTurn) releaseAdmission(sem chan struct{}) {

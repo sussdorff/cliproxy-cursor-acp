@@ -461,7 +461,7 @@ func (s *Service) StartTurn(ctx context.Context, request ToolTurnRequest) (ToolT
 	}
 	s.nextTurn++
 	turnCtx, cancel := context.WithTimeout(context.Background(), s.timeout)
-	turn := &pendingToolTurn{authID: request.Request.AuthID, conversationID: request.Request.ConversationID, generation: s.nextTurn, tools: cloneToolNames(request.Tools), ctx: turnCtx, cancel: cancel, events: make(chan toolTurnOutcome, 1)}
+	turn := &pendingToolTurn{authID: request.Request.AuthID, conversationID: request.Request.ConversationID, generation: s.nextTurn, tools: cloneToolNames(request.Tools), ctx: turnCtx, cancel: cancel, events: make(chan toolTurnOutcome, 1), done: make(chan struct{})}
 	s.pendingTurns[turn.conversationID] = turn
 	s.mu.Unlock()
 	go s.runToolTurn(request.Request, turn)
@@ -493,6 +493,7 @@ func (s *Service) ResumeTurn(ctx context.Context, submission ToolResultSubmissio
 		s.mu.Unlock()
 		if cancelCurrent {
 			turn.cancel()
+			<-turn.done
 		}
 		return ToolTurnEvent{}, fatal("stale_tool_call", fmt.Errorf("tool result belongs to an expired ACP turn"))
 	}
@@ -500,6 +501,7 @@ func (s *Service) ResumeTurn(ctx context.Context, submission ToolResultSubmissio
 		delete(s.pendingCalls, submission.CallID)
 		turn.cancel()
 		s.mu.Unlock()
+		<-turn.done
 		return ToolTurnEvent{}, fatal("tool_result_too_large", fmt.Errorf("caller tool result exceeds configured maximum"))
 	}
 	delete(s.pendingCalls, submission.CallID)
@@ -507,9 +509,11 @@ func (s *Service) ResumeTurn(ctx context.Context, submission ToolResultSubmissio
 	select {
 	case call.result <- submission.Result:
 	case <-turn.ctx.Done():
+		<-turn.done
 		return ToolTurnEvent{}, retryable("turn_cancelled", turn.ctx.Err())
 	case <-ctx.Done():
 		turn.cancel()
+		<-turn.done
 		return ToolTurnEvent{}, retryable("request_cancelled", ctx.Err())
 	}
 	return s.awaitToolTurn(ctx, turn)
@@ -521,11 +525,11 @@ func (s *Service) runToolTurn(request Request, turn *pendingToolTurn) {
 	if err == nil {
 		outcome.event = ToolTurnEvent{ConversationID: turn.conversationID, Result: &result}
 	}
+	s.completeToolTurn(turn)
 	select {
 	case turn.events <- outcome:
-	case <-turn.ctx.Done():
+	default:
 	}
-	s.finishToolTurn(turn)
 }
 
 func (s *Service) handleToolCall(ctx context.Context, turn *pendingToolTurn, request ToolRequest) (ToolResult, error) {
@@ -639,12 +643,15 @@ func (s *Service) awaitToolTurn(ctx context.Context, turn *pendingToolTurn) (Too
 	case outcome := <-turn.events:
 		if outcome.final {
 			turn.cancel()
+			<-turn.done
 		}
 		return outcome.event, outcome.err
 	case <-turn.ctx.Done():
+		<-turn.done
 		return ToolTurnEvent{}, retryable("turn_cancelled", turn.ctx.Err())
 	case <-ctx.Done():
 		turn.cancel()
+		<-turn.done
 		return ToolTurnEvent{}, retryable("request_cancelled", ctx.Err())
 	}
 }
@@ -661,6 +668,13 @@ func (s *Service) finishToolTurn(turn *pendingToolTurn) {
 	}
 	s.mu.Unlock()
 	turn.releaseAdmission(s.sem)
+}
+
+func (s *Service) completeToolTurn(turn *pendingToolTurn) {
+	turn.completionOnce.Do(func() {
+		s.finishToolTurn(turn)
+		close(turn.done)
+	})
 }
 
 func (s *Service) removePendingCall(id string, call *pendingToolCall) {
@@ -710,6 +724,9 @@ func (s *Service) Close() error {
 	s.mu.Unlock()
 	for _, turn := range turns {
 		turn.cancel()
+	}
+	for _, turn := range turns {
+		<-turn.done
 	}
 	for _, runtime := range runtimes {
 		runtime.turn <- struct{}{}
