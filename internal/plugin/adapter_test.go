@@ -191,6 +191,18 @@ func newHarnessAtWithOptions(t *testing.T, executable, dataRoot string, options 
 	return &harness{adapter: adapter, factory: factory, paths: paths, service: service, dataRoot: dataRoot}
 }
 
+func assertNextRefreshScheduled(t *testing.T, got time.Time, started time.Time) {
+	t.Helper()
+	if got.IsZero() {
+		t.Fatal("NextRefreshAfter is zero")
+	}
+	earliest := started.Add(authRefreshInterval - time.Second)
+	latest := started.Add(authRefreshInterval + 5*time.Second)
+	if got.Before(earliest) || got.After(latest) {
+		t.Fatalf("NextRefreshAfter = %s, want about %s from %s", got, authRefreshInterval, started)
+	}
+}
+
 func completeLogin(t *testing.T, adapter *Adapter) pluginapi.AuthData {
 	t.Helper()
 	start, err := adapter.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{BaseURL: "http://127.0.0.1:8317/v0/management/oauth-callback"})
@@ -267,10 +279,12 @@ func TestStartLoginWithoutCursorCLIPointsAtTheSetupPage(t *testing.T) {
 
 func TestLoginCreatesAccountBoundToItsOwnPrivateProfile(t *testing.T) {
 	harness := newHarness(t, writeFakeAgent(t))
+	started := time.Now()
 	auth := completeLogin(t, harness.adapter)
 	if auth.Provider != cursor.ProviderID || auth.Prefix != "cursor" || auth.Disabled {
 		t.Fatalf("auth = %#v", auth)
 	}
+	assertNextRefreshScheduled(t, auth.NextRefreshAfter, started)
 	var stored map[string]any
 	if err := json.Unmarshal(auth.StorageJSON, &stored); err != nil {
 		t.Fatal(err)
@@ -317,6 +331,7 @@ func TestParseAuthReconstructsAccountsAfterHostRestart(t *testing.T) {
 	// directories are still the ones this plugin owns.
 	restarted := newHarnessAt(t, "", origin.dataRoot)
 	for _, auth := range []pluginapi.AuthData{first, second} {
+		started := time.Now()
 		response, err := restarted.adapter.ParseAuth(context.Background(), pluginapi.AuthParseRequest{Provider: cursor.ProviderID, RawJSON: auth.StorageJSON})
 		if err != nil {
 			t.Fatal(err)
@@ -324,6 +339,7 @@ func TestParseAuthReconstructsAccountsAfterHostRestart(t *testing.T) {
 		if !response.Handled || response.Auth.ID != auth.ID {
 			t.Fatalf("parse = %#v", response)
 		}
+		assertNextRefreshScheduled(t, response.Auth.NextRefreshAfter, started)
 		models, errModels := restarted.adapter.ModelsForAuth(context.Background(), pluginapi.AuthModelRequest{AuthID: auth.ID})
 		if errModels != nil {
 			t.Fatal(errModels)
@@ -699,6 +715,7 @@ func TestLoginCreatedAccountsStayIsolatedUnderConcurrency(t *testing.T) {
 func TestRefreshAuthReprobesTheStoredRecord(t *testing.T) {
 	harness := newHarness(t, writeFakeAgent(t))
 	auth := completeLogin(t, harness.adapter)
+	started := time.Now()
 	refreshed, err := harness.adapter.RefreshAuth(context.Background(), pluginapi.AuthRefreshRequest{AuthID: auth.ID, StorageJSON: auth.StorageJSON})
 	if err != nil {
 		t.Fatal(err)
@@ -706,6 +723,8 @@ func TestRefreshAuthReprobesTheStoredRecord(t *testing.T) {
 	if refreshed.Auth.ID != auth.ID || refreshed.Auth.Disabled {
 		t.Fatalf("refresh = %#v", refreshed)
 	}
+	assertNextRefreshScheduled(t, refreshed.NextRefreshAfter, started)
+	assertNextRefreshScheduled(t, refreshed.Auth.NextRefreshAfter, started)
 	if refreshed.Auth.Metadata["subscription_quota_available"] != false || refreshed.Auth.Metadata["exact_subscription_quota"] != nil {
 		t.Fatalf("quota metadata = %#v", refreshed.Auth.Metadata)
 	}
