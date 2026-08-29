@@ -199,8 +199,27 @@ the request.
 ### Use T3 Code with OpenCode as the tool harness
 
 T3 Code launches the locally installed OpenCode executable; it does not need a
-plugin-specific provider. Install both tools, then configure OpenCode's custom
-OpenAI-compatible provider in `~/.config/opencode/opencode.json`:
+plugin-specific provider.
+
+This topology requires OpenCode and CLIProxyAPI/plugin to see the project at
+the same absolute path, either because they are co-located or because the
+project is mounted identically in both environments. Configure that path in
+CLIProxyAPI before starting the harness:
+
+```yaml
+plugins:
+  configs:
+    cliproxy-cursor-acp:
+      workspace_root: /absolute/shared/project
+```
+
+The directory must satisfy the `workspace_root` ownership and permission
+requirements below. Open `/absolute/shared/project` in T3 Code, or launch T3
+Code and OpenCode from that directory, so caller tool paths use the identical
+absolute namespace.
+
+Install both tools, then configure OpenCode's custom OpenAI-compatible provider
+in `~/.config/opencode/opencode.json`:
 
 ```json
 {
@@ -270,8 +289,11 @@ cannot migrate to another account.
 
 ## Configuration reference
 
-Configuration is optional; every key has a working default. Place the mapping
-under `plugins.configs.cliproxy-cursor-acp` — see
+Every key has a working default for deployments that do not need a shared
+caller workspace. For the T3 Code/OpenCode topology above, `workspace_root` is
+mandatory unless its default already resolves to the identical absolute project
+path in both environments. Place the mapping under
+`plugins.configs.cliproxy-cursor-acp` — see
 [`config/cliproxy-cursor-acp.yaml`](config/cliproxy-cursor-acp.yaml).
 
 | Key | Default | Meaning |
