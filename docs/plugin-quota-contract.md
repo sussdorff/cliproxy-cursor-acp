@@ -98,15 +98,16 @@ Bot allowance, `POST https://cursor.com/api/dashboard/get-sand-usage-status`:
 
 | `id` | Label | Source |
 |---|---|---|
-| `total` | Total | `individualUsage.plan` used/limit/remaining (cents on token plans) and `totalPercentUsed` |
-| `cursor` | Cursor | `plan.autoPercentUsed` (Auto + Composer) |
-| `third_party` | Third Party | `plan.apiPercentUsed` (named / API models) |
-| `grok_bot` | Grok Bot | weekly Sand usage; omitted when `hasNonZeroIncludedLimit` is false |
+| `cursor` | Cursor | `plan.autoPercentUsed` (Auto + Composer); this is the only interval window |
+| `third_party` | Third Party | `plan.apiPercentUsed` (named / API models); published without interval boundaries |
+| `grok_bot` | Grok Bot | included Sand usage; omitted when `hasNonZeroIncludedLimit` is false; published without interval boundaries |
 
-Optional `spend` and `daily` come from
+The included-plan Total window and the daily cost histogram are observed internally and not published. A generic UI then renders Cursor as the main quota card and the satellite allowances as other quota items.
+
+Optional `spend` comes from
 `POST https://cursor.com/api/dashboard/get-filtered-usage-events` over the last
 30 days. `spend.metered_cents` is the plan deduction (`chargedCents`);
-`today_cents` / `period_cents` / `daily[].cost_cents` are vendor list-price
+`today_cents` / `period_cents` are vendor list-price
 (`tokenUsage.totalCents`). Raw events never leave the plugin.
 
 A consumer treats an observation older than `ttl_seconds` as stale. This

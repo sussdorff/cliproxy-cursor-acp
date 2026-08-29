@@ -18,6 +18,14 @@ import (
 
 const Version = "0.2.6"
 
+// authRefreshInterval is how soon the host should call RefreshAuth again.
+// The first login record must set this; RefreshAuth then keeps the schedule.
+const authRefreshInterval = 5 * time.Minute
+
+func nextAuthRefreshAfter() time.Time {
+	return time.Now().Add(authRefreshInterval)
+}
+
 // Options collects the collaborators an adapter needs. Every account is created
 // at runtime by the login flow or reconstructed from a stored auth record.
 type Options struct {
@@ -171,7 +179,7 @@ func (a *Adapter) RefreshAuth(ctx context.Context, request pluginapi.AuthRefresh
 	if err != nil {
 		return pluginapi.AuthRefreshResponse{}, err
 	}
-	return pluginapi.AuthRefreshResponse{Auth: a.authData(ctx, account), NextRefreshAfter: time.Now().Add(5 * time.Minute)}, nil
+	return pluginapi.AuthRefreshResponse{Auth: a.authData(ctx, account), NextRefreshAfter: nextAuthRefreshAfter()}, nil
 }
 
 func (a *Adapter) StaticModels(_ context.Context, request pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
@@ -318,6 +326,7 @@ func authDataFromSnapshot(account cursor.Account, metadata cursor.Metadata, avai
 	return pluginapi.AuthData{
 		Provider: cursor.ProviderID, ID: account.AuthID, FileName: account.AuthID + ".json",
 		Label: account.Label, Prefix: "cursor", Disabled: !available, StorageJSON: storage,
+		NextRefreshAfter: nextAuthRefreshAfter(),
 		Metadata: map[string]any{
 			"status": status, "subscription_quota_available": metadata.SubscriptionQuotaAvailable, "exact_subscription_quota": exactQuota,
 			"observed_input_tokens": metadata.ObservedInputTokens, "observed_output_tokens": metadata.ObservedOutputTokens,

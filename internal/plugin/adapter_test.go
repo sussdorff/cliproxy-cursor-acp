@@ -191,6 +191,18 @@ func newHarnessAtWithOptions(t *testing.T, executable, dataRoot string, options 
 	return &harness{adapter: adapter, factory: factory, paths: paths, service: service, dataRoot: dataRoot}
 }
 
+func assertNextRefreshScheduled(t *testing.T, got time.Time, started time.Time) {
+	t.Helper()
+	if got.IsZero() {
+		t.Fatal("NextRefreshAfter is zero")
+	}
+	earliest := started.Add(authRefreshInterval - time.Second)
+	latest := started.Add(authRefreshInterval + 5*time.Second)
+	if got.Before(earliest) || got.After(latest) {
+		t.Fatalf("NextRefreshAfter = %s, want about %s from %s", got, authRefreshInterval, started)
+	}
+}
+
 func completeLogin(t *testing.T, adapter *Adapter) pluginapi.AuthData {
 	t.Helper()
 	start, err := adapter.StartLogin(context.Background(), pluginapi.AuthLoginStartRequest{BaseURL: "http://127.0.0.1:8317/v0/management/oauth-callback"})
@@ -267,10 +279,12 @@ func TestStartLoginWithoutCursorCLIPointsAtTheSetupPage(t *testing.T) {
 
 func TestLoginCreatesAccountBoundToItsOwnPrivateProfile(t *testing.T) {
 	harness := newHarness(t, writeFakeAgent(t))
+	started := time.Now()
 	auth := completeLogin(t, harness.adapter)
 	if auth.Provider != cursor.ProviderID || auth.Prefix != "cursor" || auth.Disabled {
 		t.Fatalf("auth = %#v", auth)
 	}
+	assertNextRefreshScheduled(t, auth.NextRefreshAfter, started)
 	var stored map[string]any
 	if err := json.Unmarshal(auth.StorageJSON, &stored); err != nil {
 		t.Fatal(err)
@@ -317,6 +331,7 @@ func TestParseAuthReconstructsAccountsAfterHostRestart(t *testing.T) {
 	// directories are still the ones this plugin owns.
 	restarted := newHarnessAt(t, "", origin.dataRoot)
 	for _, auth := range []pluginapi.AuthData{first, second} {
+		started := time.Now()
 		response, err := restarted.adapter.ParseAuth(context.Background(), pluginapi.AuthParseRequest{Provider: cursor.ProviderID, RawJSON: auth.StorageJSON})
 		if err != nil {
 			t.Fatal(err)
@@ -324,6 +339,7 @@ func TestParseAuthReconstructsAccountsAfterHostRestart(t *testing.T) {
 		if !response.Handled || response.Auth.ID != auth.ID {
 			t.Fatalf("parse = %#v", response)
 		}
+		assertNextRefreshScheduled(t, response.Auth.NextRefreshAfter, started)
 		models, errModels := restarted.adapter.ModelsForAuth(context.Background(), pluginapi.AuthModelRequest{AuthID: auth.ID})
 		if errModels != nil {
 			t.Fatal(errModels)
@@ -699,6 +715,7 @@ func TestLoginCreatedAccountsStayIsolatedUnderConcurrency(t *testing.T) {
 func TestRefreshAuthReprobesTheStoredRecord(t *testing.T) {
 	harness := newHarness(t, writeFakeAgent(t))
 	auth := completeLogin(t, harness.adapter)
+	started := time.Now()
 	refreshed, err := harness.adapter.RefreshAuth(context.Background(), pluginapi.AuthRefreshRequest{AuthID: auth.ID, StorageJSON: auth.StorageJSON})
 	if err != nil {
 		t.Fatal(err)
@@ -706,6 +723,8 @@ func TestRefreshAuthReprobesTheStoredRecord(t *testing.T) {
 	if refreshed.Auth.ID != auth.ID || refreshed.Auth.Disabled {
 		t.Fatalf("refresh = %#v", refreshed)
 	}
+	assertNextRefreshScheduled(t, refreshed.NextRefreshAfter, started)
+	assertNextRefreshScheduled(t, refreshed.Auth.NextRefreshAfter, started)
 	if refreshed.Auth.Metadata["subscription_quota_available"] != false || refreshed.Auth.Metadata["exact_subscription_quota"] != nil {
 		t.Fatalf("quota metadata = %#v", refreshed.Auth.Metadata)
 	}
@@ -1106,27 +1125,27 @@ func TestPluginQuotaContractMapsCodexBarWindows(t *testing.T) {
 			},
 		},
 	})
-	if contract.Availability != pluginQuotaAvailable || len(contract.Windows) != 4 {
+	if contract.Availability != pluginQuotaAvailable || len(contract.Windows) != 3 {
 		t.Fatalf("contract = %#v", contract)
 	}
 	ids := make([]string, 0, len(contract.Windows))
 	for _, window := range contract.Windows {
 		ids = append(ids, window.ID)
-		if window.UsedPercent == nil || window.ResetAt == "" {
+		if window.UsedPercent == nil {
 			t.Fatalf("window %q is incomplete: %#v", window.ID, window)
 		}
 	}
 	if contract.Spend == nil || contract.Spend.MeteredCents == nil || *contract.Spend.MeteredCents != 98655 {
 		t.Fatalf("spend = %#v", contract.Spend)
 	}
-	if len(contract.Daily) != 2 || contract.Daily[0].Date != "2026-08-26" {
-		t.Fatalf("daily = %#v", contract.Daily)
-	}
-	if strings.Join(ids, ",") != "total,cursor,third_party,grok_bot" {
+	if strings.Join(ids, ",") != "cursor,third_party,grok_bot" {
 		t.Fatalf("window ids = %v", ids)
 	}
-	if contract.Windows[0].Unit != "cents" || contract.Windows[0].Used == nil || *contract.Windows[0].Used != 37146 {
-		t.Fatalf("total window = %#v", contract.Windows[0])
+	if contract.Windows[0].ResetAt == "" || contract.Windows[0].WindowStart == "" {
+		t.Fatalf("cursor must remain the interval window: %#v", contract.Windows[0])
+	}
+	if contract.Windows[1].ResetAt != "" || contract.Windows[2].ResetAt != "" {
+		t.Fatalf("satellite windows must omit interval boundaries: %#v %#v", contract.Windows[1], contract.Windows[2])
 	}
 	if contract.Windows[1].Used != nil || contract.Windows[2].Used != nil {
 		t.Fatalf("split windows must stay percent-only: %#v %#v", contract.Windows[1], contract.Windows[2])

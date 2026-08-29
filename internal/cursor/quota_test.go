@@ -103,8 +103,8 @@ func TestUsageSummaryMapsCurrentBillingWindowWithoutLeakingCredentials(t *testin
 	if quota.WindowStart != "2026-08-01T00:00:00.000Z" || quota.WindowEnd != "2026-09-01T00:00:00.000Z" || quota.MembershipType != "pro" {
 		t.Fatalf("quota window = %#v", quota)
 	}
-	if len(quota.Windows) != 1 || quota.Windows[0].ID != "total" {
-		t.Fatalf("quota windows = %#v, want the included-plan total", quota.Windows)
+	if len(quota.Windows) != 0 {
+		t.Fatalf("quota windows = %#v, want no total window when only plan totals exist", quota.Windows)
 	}
 }
 
@@ -154,14 +154,17 @@ func TestUsageSummaryMapsCodexBarWindows(t *testing.T) {
 	for _, window := range quota.Windows {
 		ids = append(ids, window.ID)
 	}
-	if strings.Join(ids, ",") != "total,cursor,third_party,grok_bot" {
+	if strings.Join(ids, ",") != "cursor,third_party,grok_bot" {
 		t.Fatalf("window ids = %v", ids)
 	}
-	if !quota.Windows[1].HasUsedPercent || quota.Windows[1].UsedPercent != 10.84 {
-		t.Fatalf("cursor window = %#v", quota.Windows[1])
+	if !quota.Windows[0].HasUsedPercent || quota.Windows[0].UsedPercent != 10.84 {
+		t.Fatalf("cursor window = %#v", quota.Windows[0])
 	}
-	if !quota.Windows[3].HasUsedPercent || quota.Windows[3].UsedPercent != 0.09 {
-		t.Fatalf("grok window = %#v", quota.Windows[3])
+	if quota.Windows[1].WindowStart != "" || quota.Windows[2].WindowStart != "" {
+		t.Fatalf("satellite windows must omit interval boundaries: %#v %#v", quota.Windows[1], quota.Windows[2])
+	}
+	if !quota.Windows[2].HasUsedPercent || quota.Windows[2].UsedPercent != 0.09 {
+		t.Fatalf("grok window = %#v", quota.Windows[2])
 	}
 }
 

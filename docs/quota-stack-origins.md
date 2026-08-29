@@ -50,10 +50,10 @@ Landed GitHub merges (2026-08-28):
 - UI: [sussdorff/CPA-Manager-Plus#1](https://github.com/sussdorff/CPA-Manager-Plus/pull/1)
 
 The host patch on that `main` projects the version-1 `plugin_quota` allowlist
-(including `spend` and `daily`) and serves
+(including `spend`) and serves
 `POST /v0/management/auth-files/refresh-quota`. The image fork parses that
-payload, draws the windows and spend histogram, and refreshes without clearing
-the credential list.
+payload, draws the Cursor window plus satellite allowances, and refreshes
+without clearing the credential list.
 
 Upstream contribution, if it happens later, is a separate PR into
 `router-for-me/CLIProxyAPI` and `seakee/CPA-Manager-Plus`. Until those land,
