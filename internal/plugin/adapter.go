@@ -14,7 +14,7 @@ import (
 	"github.com/sussdorff/cliproxy-cursor-acp/internal/cursor"
 )
 
-const Version = "0.3.0"
+const Version = "0.3.1"
 
 // authRefreshInterval is how soon the host should call RefreshAuth again.
 // The first login record must set this; RefreshAuth then keeps the schedule.
