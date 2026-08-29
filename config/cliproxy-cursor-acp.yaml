@@ -1,6 +1,7 @@
-# Optional. Place this mapping under plugins.configs.cliproxy-cursor-acp in the
-# CLIProxyAPI configuration. Every key has a working default, so a plugin
-# installed from a plugin store needs no configuration at all.
+# Place this mapping under plugins.configs.cliproxy-cursor-acp in the CLIProxyAPI
+# configuration. Every key has a working default for deployments without a
+# shared caller workspace. T3 Code/OpenCode requires workspace_root unless its
+# default is already the identical absolute project path in both environments.
 
 # Absolute path to the official Cursor Agent CLI. Leave unset to let the plugin
 # use its own digest-verified managed install first and `agent` from PATH after.
@@ -26,10 +27,10 @@
 #   curl -sL https://downloads.cursor.com/lab/<version>/linux/x64/agent-cli-package.tar.gz | shasum -a 256
 # agent_package_sha256: ""
 
-# Working directory offered to the Cursor Agent. Must be an absolute, private
-# (mode 0700) directory owned by the service user. Defaults to
-# <data_root>/workspace.
-# workspace_root: /srv/cliproxy-cursor-acp/workspace
+# Working directory offered to the Cursor Agent. Must be the same absolute
+# project path used by T3 Code/OpenCode, be private (mode 0700), and be owned by
+# the service user. Defaults to <data_root>/workspace.
+# workspace_root: /absolute/shared/project
 
 max_concurrent: 2
 max_prompt_bytes: 524288

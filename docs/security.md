@@ -57,6 +57,68 @@ is intentionally stripped. Plugin authentication remains the per-account
 `CURSOR_CONFIG_DIR` profile; forwarding a global key would collapse `AuthID`
 account isolation.
 
+## Caller workspace and tool authorization
+
+The plugin never opens a caller workspace path and never starts a caller shell.
+Official ACP filesystem and terminal callbacks are converted into structured
+OpenAI tool calls for the outer OpenCode harness. OpenCode owns local permission
+prompts, filesystem access, command execution, output capture, and any sandbox
+policy. A successful result is the authorization evidence returned to ACP; an
+OpenCode error envelope aborts the callback.
+
+Relative callback paths are resolved below `workspace_root`, and lexical paths
+outside that root are refused before a caller tool call exists. Literal private
+profile references in terminal command argv are also refused. Operators must
+give OpenCode and the ACP child the same absolute workspace path namespace;
+mounting the same content at different paths is unsupported because implicit
+path rewriting could cross the caller's authorization boundary. OpenCode must
+still sandbox symlink traversal and shell behavior at execution time because
+the plugin deliberately does not inspect caller workspace contents.
+
+Private profile mode `0700` and rejection of literal profile paths in ACP shell
+argv are defense-in-depth. They do not isolate `<data_root>/profiles` from
+another process running under the same operating-system identity, and the
+plugin does not parse or block dynamically constructed shell paths. If OpenCode
+is not trusted with Cursor account state, run it as a distinct identity or in a
+container or mount namespace that cannot access `<data_root>/profiles`.
+
+ACP permission requests are always cancelled; the plugin never authorizes the
+Cursor child to execute an agent-owned operation. The separate OpenAI tool call
+is the only authorization path: OpenCode approves and executes it, and its
+successful result answers the corresponding filesystem or terminal callback. If the required
+OpenCode mapping is absent, duplicated, has an incompatible schema, carries an
+unsupported terminal environment, or returns a denied/failed result, the bridge
+refuses the callback rather than guessing.
+
+Every pending call is bound to all of the following:
+
+- the CLIProxyAPI-selected `AuthID`;
+- the stable caller conversation;
+- the account ACP process generation;
+- the ACP session ID;
+- the pending turn generation;
+- one opaque random call ID.
+
+The result lookup checks all bindings under one lock and consumes the call ID
+before delivery. Wrong-account and wrong-conversation attempts leave the valid
+call untouched. Duplicate, stale, timed-out, malformed, or process-generation-
+mismatched results cannot deliver bytes to an ACP callback. Conversation
+affinity still forbids moving an active turn to another subscription account.
+
+Synthetic terminal output exists only in the active `acpProcess` collector and
+is erased at prompt completion, failure, cancellation, timeout, process
+invalidation, or shutdown. It is never placed in account metadata or another
+conversation. Errors exposed to clients remain fixed typed messages and do not
+include child output, credential data, or private profile paths.
+
+OpenAI Chat Completions and Responses do not carry a standard tool-result error
+bit. OpenCode serializes denied and failed tools as an explicit JSON envelope
+whose only field is `error`, optionally accompanied by `content`; the bridge
+recognizes only that narrow convention so ordinary JSON containing an `error`
+property is not mistaken for failure. Operators using a
+different OpenAI-compatible harness must ensure it emits the same shape or its
+failure text is indistinguishable from successful tool output.
+
 Profile and workspace paths are canonicalized before use. A profile directory
 must be a real directory owned by the service user with no group or other
 permissions, **and a direct child of `<data_root>/profiles`** — the directory the

@@ -195,7 +195,7 @@ func (f CommandFactory) Start(ctx context.Context, account Account) (ACPClient, 
 	defer cancel()
 	if _, err := client.connection.Initialize(startupCtx, acp.InitializeRequest{
 		ProtocolVersion:    acp.ProtocolVersionNumber,
-		ClientCapabilities: acp.ClientCapabilities{},
+		ClientCapabilities: acp.ClientCapabilities{Fs: acp.FileSystemCapabilities{ReadTextFile: true, WriteTextFile: true}, Terminal: true},
 		ClientInfo:         &acp.Implementation{Name: "cliproxy-cursor-acp", Version: "development"},
 	}); err != nil {
 		_ = client.Close()
@@ -250,6 +250,9 @@ type collector struct {
 	text      strings.Builder
 	overflow  bool
 	active    bool
+	handler   ToolHandler
+	terminals map[string]ToolResult
+	nextTerm  int
 }
 
 func (p *acpProcess) NewSession(ctx context.Context, cwd string) (string, error) {
@@ -266,10 +269,14 @@ func (p *acpProcess) CloseSession(ctx context.Context, sessionID string) error {
 }
 
 func (p *acpProcess) Prompt(ctx context.Context, sessionID, prompt string) (Result, error) {
+	return p.PromptWithTools(ctx, sessionID, prompt, nil)
+}
+
+func (p *acpProcess) PromptWithTools(ctx context.Context, sessionID, prompt string, handler ToolHandler) (Result, error) {
 	p.promptMu.Lock()
 	defer p.promptMu.Unlock()
 	p.mu.Lock()
-	p.collector = &collector{sessionID: sessionID, active: true}
+	p.collector = &collector{sessionID: sessionID, active: true, handler: handler, terminals: make(map[string]ToolResult)}
 	p.mu.Unlock()
 	defer func() {
 		p.mu.Lock()
@@ -290,7 +297,7 @@ func (p *acpProcess) Prompt(ctx context.Context, sessionID, prompt string) (Resu
 	if overflow {
 		return Result{}, fmt.Errorf("ACP output exceeded configured limit")
 	}
-	result := Result{Text: text}
+	result := Result{Text: text, StopReason: string(response.StopReason)}
 	if response.Usage != nil {
 		result.InputTokens = int64(response.Usage.InputTokens)
 		result.OutputTokens = int64(response.Usage.OutputTokens)
@@ -317,13 +324,25 @@ func (p *acpProcess) Close() error {
 	return closeErr
 }
 
-func (p *acpProcess) ReadTextFile(context.Context, acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	return acp.ReadTextFileResponse{}, fmt.Errorf("filesystem access disabled")
+func (p *acpProcess) ReadTextFile(ctx context.Context, request acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
+	line, limit := 0, 0
+	if request.Line != nil {
+		line = *request.Line
+	}
+	if request.Limit != nil {
+		limit = *request.Limit
+	}
+	result, err := p.callTool(ctx, string(request.SessionId), ToolRequest{Kind: ToolRead, Path: request.Path, Line: line, Limit: limit})
+	if err != nil {
+		return acp.ReadTextFileResponse{}, err
+	}
+	return acp.ReadTextFileResponse{Content: result.Output}, nil
 }
-func (p *acpProcess) WriteTextFile(context.Context, acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
-	return acp.WriteTextFileResponse{}, fmt.Errorf("filesystem access disabled")
+func (p *acpProcess) WriteTextFile(ctx context.Context, request acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
+	_, err := p.callTool(ctx, string(request.SessionId), ToolRequest{Kind: ToolWrite, Path: request.Path, Content: request.Content})
+	return acp.WriteTextFileResponse{}, err
 }
-func (p *acpProcess) RequestPermission(_ context.Context, request acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
+func (p *acpProcess) RequestPermission(_ context.Context, _ acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	return acp.RequestPermissionResponse{Outcome: acp.NewRequestPermissionOutcomeCancelled()}, nil
 }
 func (p *acpProcess) SessionUpdate(_ context.Context, notification acp.SessionNotification) error {
@@ -340,18 +359,93 @@ func (p *acpProcess) SessionUpdate(_ context.Context, notification acp.SessionNo
 	}
 	return nil
 }
-func (p *acpProcess) CreateTerminal(context.Context, acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
-	return acp.CreateTerminalResponse{}, fmt.Errorf("terminal access disabled")
+func (p *acpProcess) CreateTerminal(ctx context.Context, request acp.CreateTerminalRequest) (acp.CreateTerminalResponse, error) {
+	if len(request.Env) > 0 {
+		return acp.CreateTerminalResponse{}, fmt.Errorf("ACP terminal environment overrides have no exact OpenCode mapping")
+	}
+	workingDir := ""
+	if request.Cwd != nil {
+		workingDir = *request.Cwd
+	}
+	result, err := p.callTool(ctx, string(request.SessionId), ToolRequest{Kind: ToolShell, Command: request.Command, Args: append([]string(nil), request.Args...), WorkingDir: workingDir})
+	if err != nil {
+		return acp.CreateTerminalResponse{}, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.collector == nil || !p.collector.active || p.collector.sessionID != string(request.SessionId) {
+		return acp.CreateTerminalResponse{}, fmt.Errorf("ACP terminal callback is not bound to the active turn")
+	}
+	p.collector.nextTerm++
+	id := fmt.Sprintf("caller-terminal-%d", p.collector.nextTerm)
+	p.collector.terminals[id] = result
+	return acp.CreateTerminalResponse{TerminalId: id}, nil
 }
-func (p *acpProcess) KillTerminal(context.Context, acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
-	return acp.KillTerminalResponse{}, fmt.Errorf("terminal access disabled")
+func (p *acpProcess) KillTerminal(_ context.Context, request acp.KillTerminalRequest) (acp.KillTerminalResponse, error) {
+	if _, err := p.terminal(string(request.SessionId), request.TerminalId); err != nil {
+		return acp.KillTerminalResponse{}, err
+	}
+	return acp.KillTerminalResponse{}, nil
 }
-func (p *acpProcess) TerminalOutput(context.Context, acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
-	return acp.TerminalOutputResponse{}, fmt.Errorf("terminal access disabled")
+func (p *acpProcess) TerminalOutput(_ context.Context, request acp.TerminalOutputRequest) (acp.TerminalOutputResponse, error) {
+	result, err := p.terminal(string(request.SessionId), request.TerminalId)
+	if err != nil {
+		return acp.TerminalOutputResponse{}, err
+	}
+	var exitStatus *acp.TerminalExitStatus
+	if result.ExitCode != nil || result.Signal != nil {
+		exitStatus = &acp.TerminalExitStatus{ExitCode: result.ExitCode, Signal: result.Signal}
+	}
+	return acp.TerminalOutputResponse{Output: result.Output, ExitStatus: exitStatus}, nil
 }
-func (p *acpProcess) ReleaseTerminal(context.Context, acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
-	return acp.ReleaseTerminalResponse{}, fmt.Errorf("terminal access disabled")
+func (p *acpProcess) ReleaseTerminal(_ context.Context, request acp.ReleaseTerminalRequest) (acp.ReleaseTerminalResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.collector == nil || p.collector.sessionID != string(request.SessionId) {
+		return acp.ReleaseTerminalResponse{}, fmt.Errorf("ACP terminal is not bound to the active turn")
+	}
+	if _, ok := p.collector.terminals[request.TerminalId]; !ok {
+		return acp.ReleaseTerminalResponse{}, fmt.Errorf("unknown ACP terminal")
+	}
+	delete(p.collector.terminals, request.TerminalId)
+	return acp.ReleaseTerminalResponse{}, nil
 }
-func (p *acpProcess) WaitForTerminalExit(context.Context, acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
-	return acp.WaitForTerminalExitResponse{}, fmt.Errorf("terminal access disabled")
+func (p *acpProcess) WaitForTerminalExit(_ context.Context, request acp.WaitForTerminalExitRequest) (acp.WaitForTerminalExitResponse, error) {
+	result, err := p.terminal(string(request.SessionId), request.TerminalId)
+	if err != nil {
+		return acp.WaitForTerminalExitResponse{}, err
+	}
+	return acp.WaitForTerminalExitResponse{ExitCode: result.ExitCode, Signal: result.Signal}, nil
+}
+
+func (p *acpProcess) callTool(ctx context.Context, sessionID string, request ToolRequest) (ToolResult, error) {
+	p.mu.Lock()
+	collector := p.collector
+	if collector == nil || !collector.active || collector.sessionID != sessionID || collector.handler == nil {
+		p.mu.Unlock()
+		return ToolResult{}, fmt.Errorf("caller-owned ACP tool is unavailable")
+	}
+	handler := collector.handler
+	p.mu.Unlock()
+	result, err := handler.Call(ctx, request)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	if result.IsError {
+		return ToolResult{}, fmt.Errorf("caller refused or failed the ACP tool operation")
+	}
+	return result, nil
+}
+
+func (p *acpProcess) terminal(sessionID, terminalID string) (ToolResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.collector == nil || !p.collector.active || p.collector.sessionID != sessionID {
+		return ToolResult{}, fmt.Errorf("ACP terminal is not bound to the active turn")
+	}
+	result, ok := p.collector.terminals[terminalID]
+	if !ok {
+		return ToolResult{}, fmt.Errorf("unknown ACP terminal")
+	}
+	return result, nil
 }

@@ -3,8 +3,6 @@ package plugin
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -92,7 +90,7 @@ func (a *Adapter) Registration() pluginapi.Plugin {
 	return pluginapi.Plugin{SchemaVersion: 2, Metadata: pluginapi.Metadata{Name: "cliproxy-cursor-acp", Version: Version, Author: "Malte Sussdorff", GitHubRepository: "https://github.com/sussdorff/cliproxy-cursor-acp"}, Capabilities: pluginapi.Capabilities{
 		AuthProvider: a, ModelProvider: a, Executor: a, UsagePlugin: a, ManagementAPI: a,
 		ExecutorModelScope:   pluginapi.ExecutorModelScopeOAuth,
-		ExecutorInputFormats: []string{"openai"}, ExecutorOutputFormats: []string{"openai"},
+		ExecutorInputFormats: []string{protocolChat, protocolResponses}, ExecutorOutputFormats: []string{protocolChat, protocolResponses},
 	}}
 }
 
@@ -197,31 +195,32 @@ func (a *Adapter) ModelsForAuth(_ context.Context, request pluginapi.AuthModelRe
 }
 
 func (a *Adapter) Execute(ctx context.Context, request pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-	prompt, conversationID, stateless, err := decodeRequest(request)
+	decoded, event, actualModel, err := a.executeCallerRequest(ctx, request)
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
-	account, err := a.restoreAccountFromStorage(request.AuthID, request.StorageJSON)
-	if err != nil {
-		return pluginapi.ExecutorResponse{}, cursor.ValidationFailure("unknown_auth", "selected account is not registered")
-	}
-	actualModel := "cursor/" + account.Model
-	if request.Model != "" && request.Model != account.Model && request.Model != actualModel {
-		return pluginapi.ExecutorResponse{}, cursor.ValidationFailure("model_mismatch", "selected account does not provide requested model")
-	}
-	result, err := a.service.Execute(ctx, cursor.Request{AuthID: request.AuthID, ConversationID: conversationID, Prompt: prompt, Stateless: stateless})
-	if err != nil {
-		return pluginapi.ExecutorResponse{}, err
-	}
-	payload, err := json.Marshal(map[string]any{"id": conversationID, "object": "chat.completion", "model": actualModel, "choices": []map[string]any{{"index": 0, "message": map[string]string{"role": "assistant", "content": result.Text}, "finish_reason": "stop"}}, "usage": map[string]int64{"prompt_tokens": result.InputTokens, "completion_tokens": result.OutputTokens, "total_tokens": result.InputTokens + result.OutputTokens}})
+	payload, err := marshalCallerResponse(decoded.protocol, decoded.conversationID, actualModel, event)
 	if err != nil {
 		return pluginapi.ExecutorResponse{}, err
 	}
 	return pluginapi.ExecutorResponse{Payload: payload, Headers: http.Header{"Content-Type": []string{"application/json"}}}, nil
 }
 
-func (a *Adapter) ExecuteStream(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
-	return pluginapi.ExecutorStreamResponse{}, cursorFailure("streaming_not_yet_available", "Cursor ACP output is currently returned after each completed turn")
+func (a *Adapter) ExecuteStream(ctx context.Context, request pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+	decoded, event, actualModel, err := a.executeCallerRequest(ctx, request)
+	if err != nil {
+		return pluginapi.ExecutorStreamResponse{}, err
+	}
+	frames, err := marshalCallerStream(decoded.protocol, decoded.conversationID, actualModel, event)
+	if err != nil {
+		return pluginapi.ExecutorStreamResponse{}, err
+	}
+	chunks := make(chan pluginapi.ExecutorStreamChunk, len(frames))
+	for _, frame := range frames {
+		chunks <- pluginapi.ExecutorStreamChunk{Payload: frame}
+	}
+	close(chunks)
+	return pluginapi.ExecutorStreamResponse{Headers: http.Header{"Content-Type": []string{"text/event-stream"}}, Chunks: chunks}, nil
 }
 func (a *Adapter) CountTokens(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
 	return pluginapi.ExecutorResponse{}, cursorFailure("token_count_unavailable", "Cursor ACP does not provide a preflight token count")
@@ -340,50 +339,41 @@ func authDataFromSnapshot(account cursor.Account, metadata cursor.Metadata, avai
 	}
 }
 
+func (a *Adapter) executeCallerRequest(ctx context.Context, request pluginapi.ExecutorRequest) (callerRequest, cursor.ToolTurnEvent, string, error) {
+	decoded, err := decodeCallerRequest(request)
+	if err != nil {
+		return callerRequest{}, cursor.ToolTurnEvent{}, "", err
+	}
+	account, err := a.restoreAccountFromStorage(request.AuthID, request.StorageJSON)
+	if err != nil {
+		return callerRequest{}, cursor.ToolTurnEvent{}, "", cursor.ValidationFailure("unknown_auth", "selected account is not registered")
+	}
+	actualModel := "cursor/" + account.Model
+	if request.Model != "" && request.Model != account.Model && request.Model != actualModel {
+		return callerRequest{}, cursor.ToolTurnEvent{}, "", cursor.ValidationFailure("model_mismatch", "selected account does not provide requested model")
+	}
+	if decoded.toolResult != nil {
+		event, err := a.service.ResumeTurn(ctx, cursor.ToolResultSubmission{AuthID: request.AuthID, ConversationID: decoded.conversationID, CallID: decoded.toolResult.callID, Result: decoded.toolResult.result})
+		if decoded.conversationID == "" {
+			decoded.conversationID = event.ConversationID
+		}
+		return decoded, event, actualModel, err
+	}
+	serviceRequest := cursor.Request{AuthID: request.AuthID, ConversationID: decoded.conversationID, Prompt: decoded.prompt, Stateless: decoded.stateless}
+	if len(decoded.tools) > 0 {
+		event, err := a.service.StartTurn(ctx, cursor.ToolTurnRequest{Request: serviceRequest, Tools: decoded.tools})
+		return decoded, event, actualModel, err
+	}
+	result, err := a.service.Execute(ctx, serviceRequest)
+	return decoded, cursor.ToolTurnEvent{ConversationID: decoded.conversationID, Result: &result}, actualModel, err
+}
+
 func decodeRequest(executor pluginapi.ExecutorRequest) (prompt, conversationID string, stateless bool, err error) {
-	payload := executor.Payload
-	var request struct {
-		SessionID      string `json:"session_id"`
-		ConversationID string `json:"conversation_id"`
-		PromptCacheKey string `json:"prompt_cache_key"`
-		Prompt         string `json:"prompt"`
-		Messages       []struct {
-			Role    string `json:"role"`
-			Content any    `json:"content"`
-		} `json:"messages"`
+	decoded, err := decodeCallerRequest(executor)
+	if err != nil {
+		return "", "", false, err
 	}
-	if err = json.Unmarshal(payload, &request); err != nil {
-		return "", "", false, cursorFailure("invalid_request", "request must be JSON")
-	}
-	prompt = request.Prompt
-	for _, message := range request.Messages {
-		text, ok := contentText(message.Content)
-		if !ok {
-			return "", "", false, cursorFailure("invalid_request", "OpenAI message content must be text")
-		}
-		prompt += "[" + message.Role + "] " + text + "\n"
-	}
-	if strings.TrimSpace(prompt) == "" {
-		return "", "", false, cursorFailure("invalid_request", "OpenAI request requires text content")
-	}
-	for _, key := range []string{"derived_session_id", "execution_session_id"} {
-		if candidate, ok := executor.Metadata[key].(string); ok && strings.TrimSpace(candidate) != "" {
-			return prompt, candidate, false, nil
-		}
-	}
-	for _, candidate := range []string{request.SessionID, request.ConversationID, request.PromptCacheKey} {
-		if strings.TrimSpace(candidate) != "" {
-			return prompt, candidate, false, nil
-		}
-	}
-	{
-		identifier := make([]byte, 16)
-		if _, err := rand.Read(identifier); err != nil {
-			return "", "", false, cursor.ValidationFailure("conversation_id_unavailable", "could not create request identity")
-		}
-		conversationID = "stateless-" + hex.EncodeToString(identifier)
-	}
-	return prompt, conversationID, true, nil
+	return decoded.prompt, decoded.conversationID, decoded.stateless, nil
 }
 
 func contentText(value any) (string, bool) {

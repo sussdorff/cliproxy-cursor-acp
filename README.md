@@ -16,7 +16,10 @@ Cursor credential files, and never fabricates a subscription balance.
 ## How the pieces fit together
 
 ```text
-OpenAI-compatible client
+T3 Code
+        |
+        v
+OpenCode (caller-owned tools and permissions)
         |
         v
 CLIProxyAPI  ── selects the AuthID (priority, weight, cooldown, failover)
@@ -193,10 +196,104 @@ Each account exposes one model, `cursor/auto`, and Cursor resolves `auto`
 against that account's own entitlements. CLIProxyAPI picks which account serves
 the request.
 
+### Use T3 Code with OpenCode as the tool harness
+
+T3 Code launches the locally installed OpenCode executable; it does not need a
+plugin-specific provider.
+
+This topology requires OpenCode and CLIProxyAPI/plugin to see the project at
+the same absolute path, either because they are co-located or because the
+project is mounted identically in both environments. Configure that path in
+CLIProxyAPI before starting the harness:
+
+```yaml
+plugins:
+  configs:
+    cliproxy-cursor-acp:
+      workspace_root: /absolute/shared/project
+```
+
+The directory must satisfy the `workspace_root` ownership and permission
+requirements below. Open `/absolute/shared/project` in T3 Code, or launch T3
+Code and OpenCode from that directory, so caller tool paths use the identical
+absolute namespace.
+
+Install both tools, then configure OpenCode's custom OpenAI-compatible provider
+in `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "cliproxy-cursor": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Cursor subscriptions through CLIProxyAPI",
+      "options": {
+        "baseURL": "https://<your-cliproxyapi-host>/v1",
+        "apiKey": "{env:CLIPROXY_API_KEY}",
+        "setCacheKey": true
+      },
+      "models": {
+        "cursor-auto": {
+          "id": "cursor/auto",
+          "name": "Cursor Auto"
+        }
+      }
+    }
+  },
+  "model": "cliproxy-cursor/cursor-auto"
+}
+```
+
+Set `CLIPROXY_API_KEY` in the environment that starts T3 Code, run
+`opencode models` to confirm `cliproxy-cursor/cursor-auto`, then start T3 Code
+and select **OpenCode** as the harness. T3 Code's desktop and server launchers
+auto-detect the installed `opencode` executable.
+
+The complete path is:
+
+```text
+T3 Code -> OpenCode -> OpenAI Chat Completions or Responses
+        -> CLIProxyAPI scheduler -> selected Cursor AuthID
+        -> this plugin -> official Cursor Agent ACP
+```
+
+OpenCode remains the local execution and authorization boundary. When Cursor
+asks ACP to read or write a file or create a terminal, the plugin returns an
+ordinary OpenAI tool call. OpenCode applies its permission policy and performs
+the operation in the caller workspace. Its tool result resumes the same pending
+ACP turn. The plugin does not mount, read, write, or execute that workspace.
+
+The exact supported OpenCode mappings are:
+
+| ACP callback | OpenCode tool | Required arguments | Optional arguments |
+|---|---|---|---|
+| `fs/read_text_file` | `read` | `filePath` | `offset`, `limit` |
+| `fs/write_text_file` | `write` | `filePath`, `content` | none |
+| `terminal/create` | `bash` | `command` | `workdir` |
+
+Definitions must use those names and documented JSON-schema field types.
+Definitions must declare every listed optional field because ACP may supply it;
+only the required column is mandatory in the schema's `required` array. Extra
+required fields, missing, duplicate, or incompatible definitions fail closed. ACP terminal
+environment overrides have no exact OpenCode mapping and are refused. Terminal
+output, exit status, wait, kill, and release are synthetic views of the one
+caller-owned `bash` result; no shell is started inside the plugin.
+
+To verify routing across multiple subscriptions, add at least two Cursor logins
+in CLIProxyAPI, confirm that both auth records are enabled, and start separate
+OpenCode conversations. CLIProxyAPI selects the account for each first turn;
+the plugin pins every later tool pause and result to that selected `AuthID`, ACP
+process generation, ACP session, conversation, and turn. An active conversation
+cannot migrate to another account.
+
 ## Configuration reference
 
-Configuration is optional; every key has a working default. Place the mapping
-under `plugins.configs.cliproxy-cursor-acp` — see
+Every key has a working default for deployments that do not need a shared
+caller workspace. For the T3 Code/OpenCode topology above, `workspace_root` is
+mandatory unless its default already resolves to the identical absolute project
+path in both environments. Place the mapping under
+`plugins.configs.cliproxy-cursor-acp` — see
 [`config/cliproxy-cursor-acp.yaml`](config/cliproxy-cursor-acp.yaml).
 
 | Key | Default | Meaning |
@@ -208,7 +305,7 @@ under `plugins.configs.cliproxy-cursor-acp` — see
 | `workspace_root` | `<data_root>/workspace` | Working directory offered to the Cursor Agent. Must be absolute, mode `0700`, owned by the service user. |
 | `max_concurrent` | `2` | Maximum concurrent ACP turns across all accounts. |
 | `max_prompt_bytes` | `524288` | Maximum prompt size accepted from a client. |
-| `max_output_bytes` | `1048576` | Maximum collected ACP output per turn. |
+| `max_output_bytes` | `1048576` | Maximum collected ACP output and caller tool-result size per turn. |
 | `timeout` | `2m` | Bound on one ACP execution. |
 
 There is **no** `accounts:` block. Accounts exist only as CLIProxyAPI auth
@@ -242,6 +339,11 @@ directories do not, and each account has to log in again.
 - Profile directories are created with mode `0700` and are refused at
   registration if they grant group or other access or are not owned by the
   service user. Two accounts can never share one profile directory.
+- Mode `0700` and literal profile-path rejection are defense-in-depth, not
+  isolation from OpenCode running as the same operating-system identity. The
+  plugin does not parse dynamically constructed shell paths. Run untrusted
+  OpenCode under a distinct identity or container/mount namespace without
+  access to `<data_root>/profiles`.
 - A profile directory must be a direct child of `<data_root>/profiles`, so a
   stored auth record cannot aim the Cursor CLI at the host auth directory or any
   other path. Re-authenticating an account deletes its previous profile.
@@ -267,8 +369,36 @@ See [docs/security.md](docs/security.md) for the full boundary and
 
 ## Limitations
 
-- **No streaming.** `ExecuteStream` returns an explicit unsupported error; a turn
-  is returned after it completes.
+- **Only OpenAI Chat Completions and Responses.** Anthropic Messages is not
+  bridged. Streaming and non-streaming responses are supported for both OpenAI
+  shapes.
+- **Only exact OpenCode `read`, `write`, and `bash` schemas.** Arbitrary tool
+  inference, terminal environment overrides, and interactive or long-lived
+  terminals are not mapped. ACP command argv is encoded as a POSIX shell
+  command, so the OpenCode `bash` tool must use POSIX quoting semantics.
+- **Caller and ACP paths share one namespace.** Relative callback paths and
+  `workdir` values are resolved below `workspace_root`; paths outside it are
+  refused. The supported setup therefore runs OpenCode where the resulting
+  absolute paths name the same workspace; the bridge does not translate paths
+  between unrelated hosts or container mounts.
+- **Stable conversation metadata is preferred.** OpenCode's cache key,
+  `session_id`, `conversation_id`, and CLIProxyAPI's stable execution metadata
+  are accepted. When none is present, the bridge creates an internal random
+  conversation and correlates the continuation by its opaque tool-call ID;
+  text-only metadata-free requests remain stateless and compatible.
+- **One configured timeout bounds the entire paused ACP turn.** Every caller
+  result must arrive before `timeout`; late results are stale and refused.
+- **Paused turns retain concurrency permits.** A pending caller permission or
+  tool result continues to occupy one global `max_concurrent` slot and the
+  selected account's single ACP turn slot. Size these bounds for the number of
+  simultaneously paused conversations operators intend to allow.
+- **OpenAI tool-result error convention.** OpenCode encodes denied or failed
+  tools as a JSON object whose only field is `error`, optionally accompanied by
+  `content`. The bridge treats only that explicit envelope as a refusal and
+  aborts the ACP callback. Other OpenAI-compatible callers must use the same
+  convention; the base OpenAI wire schemas have no separate error or terminal
+  exit-status bit, so an unavailable exit status is omitted rather than
+  reported as success.
 - **No preflight token counting.** `CountTokens` returns an explicit unsupported
   error.
 - **Best-effort subscription quota.** The plugin publishes the account-scoped
