@@ -128,12 +128,12 @@ func marshalChatStream(conversationID, model string, event cursor.ToolTurnEvent)
 	}
 	first, _ := json.Marshal(map[string]any{"id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": nil}}})
 	last, _ := json.Marshal(map[string]any{"id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": finish}}})
-	frames := [][]byte{[]byte("data: " + string(first) + "\n\n"), []byte("data: " + string(last) + "\n\n")}
+	frames := [][]byte{first, last}
 	if event.Result != nil {
 		usage, _ := json.Marshal(map[string]any{"id": id, "object": "chat.completion.chunk", "created": created, "model": model, "choices": []any{}, "usage": map[string]int64{"prompt_tokens": event.Result.InputTokens, "completion_tokens": event.Result.OutputTokens, "total_tokens": event.Result.InputTokens + event.Result.OutputTokens}})
-		frames = append(frames, []byte("data: "+string(usage)+"\n\n"))
+		frames = append(frames, usage)
 	}
-	return append(frames, []byte("data: [DONE]\n\n")), nil
+	return frames, nil
 }
 
 func marshalResponsesStream(conversationID, model string, turnEvent cursor.ToolTurnEvent) ([][]byte, error) {

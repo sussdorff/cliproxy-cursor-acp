@@ -1219,7 +1219,7 @@ func TestAdapterStreamsProtocolValidToolAndFinalFrames(t *testing.T) {
 				}
 				chunks.Write(chunk.Payload)
 			}
-			if protocol == "openai" && (!strings.Contains(chunks.String(), `"finish_reason":"tool_calls"`) || !strings.Contains(chunks.String(), "data: [DONE]")) {
+			if protocol == "openai" && (!strings.Contains(chunks.String(), `"finish_reason":"tool_calls"`) || strings.Contains(chunks.String(), "data:") || strings.Contains(chunks.String(), "[DONE]")) {
 				t.Fatalf("Chat stream = %s", chunks.String())
 			}
 			if protocol == "openai-response" && (!strings.Contains(chunks.String(), "response.output_item.done") || !strings.Contains(chunks.String(), "response.completed")) {
