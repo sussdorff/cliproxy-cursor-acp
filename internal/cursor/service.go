@@ -284,11 +284,13 @@ func (s *Service) execute(ctx context.Context, request Request, handler ToolHand
 	case <-ctx.Done():
 		return Result{}, retryable("request_cancelled", ctx.Err())
 	}
-	select {
-	case s.sem <- struct{}{}:
-		defer func() { <-s.sem }()
-	case <-ctx.Done():
-		return Result{}, retryable("request_cancelled", ctx.Err())
+	if turn == nil {
+		select {
+		case s.sem <- struct{}{}:
+			defer func() { <-s.sem }()
+		case <-ctx.Done():
+			return Result{}, retryable("request_cancelled", ctx.Err())
+		}
 	}
 	executionCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -436,6 +438,27 @@ func (s *Service) StartTurn(ctx context.Context, request ToolTurnRequest) (ToolT
 		s.mu.Unlock()
 		return ToolTurnEvent{}, fatal("turn_already_pending", fmt.Errorf("conversation already has a pending ACP turn"))
 	}
+	s.mu.Unlock()
+	select {
+	case s.sem <- struct{}{}:
+	case <-ctx.Done():
+		return ToolTurnEvent{}, retryable("request_cancelled", ctx.Err())
+	}
+	if err := ctx.Err(); err != nil {
+		<-s.sem
+		return ToolTurnEvent{}, retryable("request_cancelled", err)
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		<-s.sem
+		return ToolTurnEvent{}, retryable("service_closed", fmt.Errorf("Cursor ACP service is closed"))
+	}
+	if existing := s.pendingTurns[request.Request.ConversationID]; existing != nil {
+		s.mu.Unlock()
+		<-s.sem
+		return ToolTurnEvent{}, fatal("turn_already_pending", fmt.Errorf("conversation already has a pending ACP turn"))
+	}
 	s.nextTurn++
 	turnCtx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	turn := &pendingToolTurn{authID: request.Request.AuthID, conversationID: request.Request.ConversationID, generation: s.nextTurn, tools: cloneToolNames(request.Tools), ctx: turnCtx, cancel: cancel, events: make(chan toolTurnOutcome, 1)}
@@ -466,7 +489,11 @@ func (s *Service) ResumeTurn(ctx context.Context, submission ToolResultSubmissio
 	currentTurn := s.pendingTurns[turn.conversationID]
 	if runtime == nil || runtime.generation != call.processGen || runtime.sessions[turn.conversationID] != call.sessionID || currentTurn != turn || turn.generation != call.turnGen || turn.ctx.Err() != nil {
 		delete(s.pendingCalls, submission.CallID)
+		cancelCurrent := currentTurn == turn
 		s.mu.Unlock()
+		if cancelCurrent {
+			turn.cancel()
+		}
 		return ToolTurnEvent{}, fatal("stale_tool_call", fmt.Errorf("tool result belongs to an expired ACP turn"))
 	}
 	if len(submission.Result.Output) > s.maxToolResultBytes {
@@ -633,6 +660,7 @@ func (s *Service) finishToolTurn(turn *pendingToolTurn) {
 		}
 	}
 	s.mu.Unlock()
+	turn.releaseAdmission(s.sem)
 }
 
 func (s *Service) removePendingCall(id string, call *pendingToolCall) {

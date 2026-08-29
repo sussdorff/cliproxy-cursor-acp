@@ -237,6 +237,10 @@ func (f *bridgeFactory) Start(_ context.Context, account Account) (ACPClient, er
 }
 
 func testBridgeService(t *testing.T) *Service {
+	return testBridgeServiceWithMaxConcurrent(t, 2)
+}
+
+func testBridgeServiceWithMaxConcurrent(t *testing.T, maxConcurrent int) *Service {
 	t.Helper()
 	root := t.TempDir()
 	profiles := root + "/profiles"
@@ -251,7 +255,7 @@ func testBridgeService(t *testing.T) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(Config{Executable: os.Args[0], MaxConcurrent: 2, MaxPromptBytes: 1024, MaxOutputBytes: 1024, Timeout: time.Second}, paths, &bridgeFactory{workspace: canonicalWorkspace})
+	service, err := NewService(Config{Executable: os.Args[0], MaxConcurrent: maxConcurrent, MaxPromptBytes: 1024, MaxOutputBytes: 1024, Timeout: time.Second}, paths, &bridgeFactory{workspace: canonicalWorkspace})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,6 +266,81 @@ func testBridgeService(t *testing.T) *Service {
 	}
 	t.Cleanup(func() { _ = service.Close() })
 	return service
+}
+
+func TestStartTurnAdmitsCapacityBeforeAllocatingPendingState(t *testing.T) {
+	service := testBridgeServiceWithMaxConcurrent(t, 1)
+	first, err := service.StartTurn(context.Background(), ToolTurnRequest{Request: Request{AuthID: "cursor-a", ConversationID: "admitted", Prompt: "inspect"}, Tools: ToolNames{ToolRead: "read"}})
+	if err != nil || first.ToolCall == nil {
+		t.Fatalf("first turn = %#v, %v", first, err)
+	}
+
+	type startResult struct {
+		event ToolTurnEvent
+		err   error
+	}
+	started := make(chan struct{})
+	secondDone := make(chan startResult, 1)
+	go func() {
+		close(started)
+		event, startErr := service.StartTurn(context.Background(), ToolTurnRequest{Request: Request{AuthID: "cursor-b", ConversationID: "waiting-admission", Prompt: "inspect"}, Tools: ToolNames{ToolRead: "read"}})
+		secondDone <- startResult{event: event, err: startErr}
+	}()
+	<-started
+	select {
+	case result := <-secondDone:
+		t.Fatalf("excess turn completed before capacity release: %#v, %v", result.event, result.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	service.mu.Lock()
+	pendingBeforeRelease := len(service.pendingTurns)
+	secondClientStarted := service.accounts["cursor-b"].client != nil
+	service.mu.Unlock()
+
+	if _, err := service.ResumeTurn(context.Background(), ToolResultSubmission{AuthID: "cursor-a", ConversationID: "admitted", CallID: first.ToolCall.ID, Result: ToolResult{Output: "first"}}); err != nil {
+		t.Fatal(err)
+	}
+	second := <-secondDone
+	if second.err != nil || second.event.ToolCall == nil {
+		t.Fatalf("second turn after release = %#v, %v", second.event, second.err)
+	}
+	if _, err := service.ResumeTurn(context.Background(), ToolResultSubmission{AuthID: "cursor-b", ConversationID: "waiting-admission", CallID: second.event.ToolCall.ID, Result: ToolResult{Output: "second"}}); err != nil {
+		t.Fatal(err)
+	}
+	if pendingBeforeRelease != 1 || secondClientStarted {
+		t.Fatalf("excess admission allocated state: pending=%d second_client_started=%t", pendingBeforeRelease, secondClientStarted)
+	}
+}
+
+func TestStaleCurrentTurnCancelsAndReleasesAdmission(t *testing.T) {
+	service := testBridgeServiceWithMaxConcurrent(t, 1)
+	stale, err := service.StartTurn(context.Background(), ToolTurnRequest{Request: Request{AuthID: "cursor-a", ConversationID: "stale-release", Prompt: "inspect"}, Tools: ToolNames{ToolRead: "read"}})
+	if err != nil || stale.ToolCall == nil {
+		t.Fatalf("stale turn = %#v, %v", stale, err)
+	}
+	service.mu.Lock()
+	client := service.accounts["cursor-a"].client
+	service.mu.Unlock()
+	service.invalidate("cursor-a", client)
+	if _, err := service.ResumeTurn(context.Background(), ToolResultSubmission{AuthID: "cursor-a", ConversationID: "stale-release", CallID: stale.ToolCall.ID}); FailureCode(err) != "stale_tool_call" {
+		t.Fatalf("stale result error = %#v", err)
+	}
+	eventually(t, 250*time.Millisecond, func() bool {
+		service.mu.Lock()
+		defer service.mu.Unlock()
+		return service.pendingTurns["stale-release"] == nil && len(service.sem) == 0
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	next, err := service.StartTurn(ctx, ToolTurnRequest{Request: Request{AuthID: "cursor-b", ConversationID: "after-stale", Prompt: "inspect"}, Tools: ToolNames{ToolRead: "read"}})
+	if err != nil || next.ToolCall == nil {
+		t.Fatalf("turn after stale release = %#v, %v", next, err)
+	}
+	if _, err := service.ResumeTurn(context.Background(), ToolResultSubmission{AuthID: "cursor-b", ConversationID: "after-stale", CallID: next.ToolCall.ID, Result: ToolResult{Output: "next"}}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestServicePausesAndResumesExactPendingToolCall(t *testing.T) {
@@ -446,7 +525,7 @@ func TestPendingTurnChildFailureUnblocksAndCleansState(t *testing.T) {
 	}
 	service.mu.Lock()
 	defer service.mu.Unlock()
-	if len(service.pendingTurns) != 0 || len(service.pendingCalls) != 0 || service.accounts["cursor-a"].client != nil {
+	if len(service.pendingTurns) != 0 || len(service.pendingCalls) != 0 || len(service.sem) != 0 || service.accounts["cursor-a"].client != nil {
 		t.Fatalf("state survived child failure")
 	}
 }
@@ -500,8 +579,8 @@ func TestPendingTurnCancellationTimeoutAndShutdownCleanState(t *testing.T) {
 			}
 			service.mu.Lock()
 			defer service.mu.Unlock()
-			if len(service.pendingTurns) != 0 || len(service.pendingCalls) != 0 {
-				t.Fatalf("pending state after %s: turns=%d calls=%d", mode, len(service.pendingTurns), len(service.pendingCalls))
+			if len(service.pendingTurns) != 0 || len(service.pendingCalls) != 0 || len(service.sem) != 0 {
+				t.Fatalf("pending state after %s: turns=%d calls=%d permits=%d", mode, len(service.pendingTurns), len(service.pendingCalls), len(service.sem))
 			}
 		})
 	}

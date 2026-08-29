@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1128,6 +1129,41 @@ func TestCallerResultEnvelopeAndStopReasonsStayTruthful(t *testing.T) {
 	response := responsesResponse("turn", "cursor/auto", cursor.ToolTurnEvent{Result: &cursor.Result{Text: "partial", StopReason: "max_turn_requests"}})
 	if response["status"] != "incomplete" {
 		t.Fatalf("Responses stop state = %#v", response)
+	}
+}
+
+func TestResponsesStreamTerminalEventMatchesMappedStatus(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		stopReason string
+		terminal   string
+	}{
+		{name: "max tokens", stopReason: "max_tokens", terminal: "response.incomplete"},
+		{name: "max turn requests", stopReason: "max_turn_requests", terminal: "response.incomplete"},
+		{name: "refusal", stopReason: "refusal", terminal: "response.failed"},
+		{name: "cancelled", stopReason: "cancelled", terminal: "response.cancelled"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			frames, err := marshalResponsesStream("status-turn", "cursor/auto", cursor.ToolTurnEvent{Result: &cursor.Result{Text: "partial", StopReason: testCase.stopReason}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream := string(bytes.Join(frames, nil))
+			if !strings.Contains(stream, "event: "+testCase.terminal+"\n") || !strings.Contains(stream, `"type":"`+testCase.terminal+`"`) {
+				t.Fatalf("terminal stream = %s", stream)
+			}
+			if strings.Contains(stream, "event: response.completed\n") {
+				t.Fatalf("non-completed stream emitted response.completed: %s", stream)
+			}
+		})
+	}
+
+	toolFrames, err := marshalResponsesStream("tool-turn", "cursor/auto", cursor.ToolTurnEvent{ToolCall: &cursor.ToolCall{ID: "call-1", Name: "read", Request: cursor.ToolRequest{Kind: cursor.ToolRead, Path: "/workspace/main.go"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stream := string(bytes.Join(toolFrames, nil)); !strings.Contains(stream, "event: response.completed\n") {
+		t.Fatalf("tool pause terminal stream = %s", stream)
 	}
 }
 

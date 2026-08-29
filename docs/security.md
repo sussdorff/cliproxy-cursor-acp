@@ -75,6 +75,13 @@ path rewriting could cross the caller's authorization boundary. OpenCode must
 still sandbox symlink traversal and shell behavior at execution time because
 the plugin deliberately does not inspect caller workspace contents.
 
+Private profile mode `0700` and rejection of literal profile paths in ACP shell
+argv are defense-in-depth. They do not isolate `<data_root>/profiles` from
+another process running under the same operating-system identity, and the
+plugin does not parse or block dynamically constructed shell paths. If OpenCode
+is not trusted with Cursor account state, run it as a distinct identity or in a
+container or mount namespace that cannot access `<data_root>/profiles`.
+
 ACP permission requests are always cancelled; the plugin never authorizes the
 Cursor child to execute an agent-owned operation. The separate OpenAI tool call
 is the only authorization path: OpenCode approves and executes it, and its

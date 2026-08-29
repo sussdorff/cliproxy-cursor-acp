@@ -151,7 +151,16 @@ func marshalResponsesStream(conversationID, model string, turnEvent cursor.ToolT
 		frames = append(frames, responseSSE("response.output_text.delta", map[string]any{"type": "response.output_text.delta", "sequence_number": sequence, "item_id": "msg-" + conversationID, "output_index": 0, "content_index": 0, "delta": turnEvent.Result.Text}))
 		sequence++
 	}
-	frames = append(frames, responseSSE("response.completed", map[string]any{"type": "response.completed", "sequence_number": sequence, "response": response}))
+	terminal := "response.completed"
+	if turnEvent.ToolCall == nil {
+		if status, ok := response["status"].(string); ok {
+			switch status {
+			case "incomplete", "failed", "cancelled":
+				terminal = "response." + status
+			}
+		}
+	}
+	frames = append(frames, responseSSE(terminal, map[string]any{"type": terminal, "sequence_number": sequence, "response": response}))
 	return frames, nil
 }
 

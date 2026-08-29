@@ -131,6 +131,9 @@ Paused prompts retain their global concurrency permit and their selected
 account's serialized ACP turn permit. This keeps the existing process and
 scheduler bounds authoritative while the callback is outstanding; operators
 must configure `max_concurrent` for their intended number of pending prompts.
+`StartTurn` acquires that global permit before it allocates persistent turn
+state or starts the ACP goroutine, so requests waiting for capacity do not grow
+the pending-turn registry.
 
 `StartTurn` creates a background context bounded by the configured timeout, not
 by the lifetime of the HTTP handler that returned the tool call. The pending

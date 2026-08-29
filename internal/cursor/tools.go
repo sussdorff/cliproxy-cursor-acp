@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sync"
 )
 
 // ToolKind identifies the narrow caller-owned operations supported by the ACP
@@ -84,6 +85,11 @@ type pendingToolTurn struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	events         chan toolTurnOutcome
+	admissionOnce  sync.Once
+}
+
+func (t *pendingToolTurn) releaseAdmission(sem chan struct{}) {
+	t.admissionOnce.Do(func() { <-sem })
 }
 
 type pendingToolCall struct {

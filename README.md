@@ -339,6 +339,11 @@ directories do not, and each account has to log in again.
 - Profile directories are created with mode `0700` and are refused at
   registration if they grant group or other access or are not owned by the
   service user. Two accounts can never share one profile directory.
+- Mode `0700` and literal profile-path rejection are defense-in-depth, not
+  isolation from OpenCode running as the same operating-system identity. The
+  plugin does not parse dynamically constructed shell paths. Run untrusted
+  OpenCode under a distinct identity or container/mount namespace without
+  access to `<data_root>/profiles`.
 - A profile directory must be a direct child of `<data_root>/profiles`, so a
   stored auth record cannot aim the Cursor CLI at the host auth directory or any
   other path. Re-authenticating an account deletes its previous profile.
