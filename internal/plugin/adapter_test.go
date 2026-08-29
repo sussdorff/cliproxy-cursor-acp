@@ -45,8 +45,84 @@ func (testACP) NewSession(context.Context, string) (string, error) { return "ses
 func (testACP) Prompt(context.Context, string, string) (cursor.Result, error) {
 	return cursor.Result{Text: "ok", InputTokens: 2, OutputTokens: 3}, nil
 }
+func (client testACP) PromptWithTools(ctx context.Context, sessionID, prompt string, _ cursor.ToolHandler) (cursor.Result, error) {
+	return client.Prompt(ctx, sessionID, prompt)
+}
 func (testACP) Close() error                               { return nil }
 func (testACP) CloseSession(context.Context, string) error { return nil }
+
+type bridgeACP struct{ workspace string }
+
+func (bridgeACP) NewSession(context.Context, string) (string, error) { return "bridge-session", nil }
+func (bridgeACP) Prompt(context.Context, string, string) (cursor.Result, error) {
+	return cursor.Result{Text: "plain-follow-up", StopReason: "end_turn"}, nil
+}
+func (client bridgeACP) PromptWithTools(ctx context.Context, _ string, prompt string, handler cursor.ToolHandler) (cursor.Result, error) {
+	result, err := handler.Call(ctx, cursor.ToolRequest{Kind: cursor.ToolRead, Path: client.workspace + "/main.go", Line: 2, Limit: 5})
+	if err != nil {
+		return cursor.Result{}, err
+	}
+	if strings.Contains(prompt, "two tools") {
+		written, err := handler.Call(ctx, cursor.ToolRequest{Kind: cursor.ToolWrite, Path: client.workspace + "/out.go", Content: result.Output})
+		if err != nil {
+			return cursor.Result{}, err
+		}
+		return cursor.Result{Text: "final:" + written.Output, InputTokens: 7, OutputTokens: 11}, nil
+	}
+	return cursor.Result{Text: "final:" + result.Output, InputTokens: 7, OutputTokens: 11}, nil
+}
+func (bridgeACP) Close() error                               { return nil }
+func (bridgeACP) CloseSession(context.Context, string) error { return nil }
+
+type bridgeAdapterFactory struct{ workspace string }
+
+func (f bridgeAdapterFactory) Start(context.Context, cursor.Account) (cursor.ACPClient, error) {
+	return bridgeACP{workspace: f.workspace}, nil
+}
+
+func newToolBridgeAdapter(t *testing.T) (*Adapter, pluginapi.AuthData) {
+	t.Helper()
+	root := t.TempDir()
+	paths := cursor.NewPaths(root, filepath.Join(root, "workspace"))
+	if err := os.MkdirAll(filepath.Join(root, "workspace"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := paths.ProfilesRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := filepath.Join(profiles, "cursor-a")
+	if err := os.MkdirAll(profile, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config, err := cursor.NormalizeConfig(cursor.Config{MaxPromptBytes: 4096, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalWorkspace, err := paths.Workspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := cursor.NewService(config, paths, bridgeAdapterFactory{workspace: canonicalWorkspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+	account, err := service.RegisterAccount(cursor.Account{AuthID: "cursor-a", ProfileDir: profile, Model: "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := New(Options{Service: service, Paths: paths, Login: &cursor.Login{}, Installer: &cursor.Installer{Paths: paths}, Config: config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage, _ := json.Marshal(storedAuth{Type: cursor.ProviderID, AuthID: account.AuthID, ProfileDir: account.ProfileDir, Model: account.Model})
+	return adapter, pluginapi.AuthData{ID: account.AuthID, StorageJSON: storage}
+}
+
+const openCodeChatTools = `[{"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{"filePath":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["filePath"]}}},{"type":"function","function":{"name":"write","parameters":{"type":"object","properties":{"filePath":{"type":"string"},"content":{"type":"string"}},"required":["filePath","content"]}}},{"type":"function","function":{"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"},"workdir":{"type":"string"}},"required":["command"]}}}]`
+
+const openCodeResponseTools = `[{"type":"function","name":"read","parameters":{"type":"object","properties":{"filePath":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["filePath"]}},{"type":"function","name":"write","parameters":{"type":"object","properties":{"filePath":{"type":"string"},"content":{"type":"string"}},"required":["filePath","content"]}},{"type":"function","name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"},"workdir":{"type":"string"}},"required":["command"]}}]`
 
 // staticQuota answers every observation with one prepared account-scoped
 // result. It performs no filesystem or network access.
@@ -897,6 +973,290 @@ func TestDecodeRequestSessionPriorityAndTranscript(t *testing.T) {
 				t.Fatalf("got %q %q %v", prompt, id, stateless)
 			}
 		})
+	}
+}
+
+func TestAdapterChatToolCallAndResultResumeSameTurn(t *testing.T) {
+	adapter, auth := newToolBridgeAdapter(t)
+	initial := []byte(`{"model":"cursor/auto","session_id":"chat-conversation","messages":[{"role":"user","content":"inspect the file"}],"tools":` + openCodeChatTools + `}`)
+	response, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", Format: "openai", OriginalRequest: initial, Payload: initial, StorageJSON: auth.StorageJSON})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paused struct {
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(response.Payload, &paused); err != nil {
+		t.Fatal(err)
+	}
+	if len(paused.Choices) != 1 || paused.Choices[0].FinishReason != "tool_calls" || len(paused.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("tool response = %s", response.Payload)
+	}
+	call := paused.Choices[0].Message.ToolCalls[0]
+	if call.ID == "" || call.Function.Name != "read" || !strings.Contains(call.Function.Arguments, `"limit":5`) || !strings.Contains(call.Function.Arguments, `"offset":2`) || !strings.Contains(call.Function.Arguments, `/workspace/main.go`) {
+		t.Fatalf("tool call = %#v", call)
+	}
+	continuation := []byte(`{"model":"cursor/auto","session_id":"chat-conversation","messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"` + call.ID + `","type":"function","function":{"name":"read","arguments":"{\"filePath\":\"/workspace/main.go\"}"}}]},{"role":"tool","tool_call_id":"` + call.ID + `","content":"caller contents"}],"tools":` + openCodeChatTools + `}`)
+	response, err = adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", Format: "openai", OriginalRequest: continuation, Payload: continuation, StorageJSON: auth.StorageJSON})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(response.Payload), `"content":"final:caller contents"`) || !strings.Contains(string(response.Payload), `"finish_reason":"stop"`) {
+		t.Fatalf("final response = %s", response.Payload)
+	}
+}
+
+func TestAdapterMetadataFreeOpenCodeToolResultUsesOpaqueCallBinding(t *testing.T) {
+	adapter, auth := newToolBridgeAdapter(t)
+	initial := []byte(`{"model":"cursor/auto","messages":[{"role":"user","content":"inspect without a client session field"}],"tools":` + openCodeChatTools + `}`)
+	response, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", Format: "openai", OriginalRequest: initial, StorageJSON: auth.StorageJSON})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paused struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls []struct {
+					ID string `json:"id"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(response.Payload, &paused); err != nil {
+		t.Fatal(err)
+	}
+	callID := paused.Choices[0].Message.ToolCalls[0].ID
+	continuation := []byte(`{"model":"cursor/auto","messages":[{"role":"user","content":"inspect without a client session field"},{"role":"tool","tool_call_id":"` + callID + `","content":"opaque contents"}],"tools":` + openCodeChatTools + `}`)
+	response, err = adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", Format: "openai", OriginalRequest: continuation, StorageJSON: auth.StorageJSON})
+	if err != nil || !strings.Contains(string(response.Payload), `"content":"final:opaque contents"`) {
+		t.Fatalf("final response = %s, %v", response.Payload, err)
+	}
+}
+
+func TestAdapterResumesLatestResultFromOpenCodeToolHistory(t *testing.T) {
+	adapter, auth := newToolBridgeAdapter(t)
+	initial := []byte(`{"model":"cursor/auto","session_id":"history","messages":[{"role":"user","content":"use two tools"}],"tools":` + openCodeChatTools + `}`)
+	firstResponse, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", Format: "openai", OriginalRequest: initial, StorageJSON: auth.StorageJSON})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolCallID := func(payload []byte) string {
+		var parsed struct {
+			Choices []struct {
+				Message struct {
+					ToolCalls []struct {
+						ID string `json:"id"`
+					} `json:"tool_calls"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(payload, &parsed); err != nil || len(parsed.Choices) != 1 || len(parsed.Choices[0].Message.ToolCalls) != 1 {
+			t.Fatalf("tool payload = %s, %v", payload, err)
+		}
+		return parsed.Choices[0].Message.ToolCalls[0].ID
+	}
+	firstID := toolCallID(firstResponse.Payload)
+	firstHistory := `{"role":"assistant","content":null,"tool_calls":[{"id":"` + firstID + `","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"` + firstID + `","content":"first output"}`
+	secondRequest := []byte(`{"model":"cursor/auto","session_id":"history","messages":[{"role":"user","content":"use two tools"},` + firstHistory + `],"tools":` + openCodeChatTools + `}`)
+	secondResponse, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", Format: "openai", OriginalRequest: secondRequest, StorageJSON: auth.StorageJSON})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID := toolCallID(secondResponse.Payload)
+	secondHistory := `{"role":"assistant","content":null,"tool_calls":[{"id":"` + secondID + `","type":"function","function":{"name":"write","arguments":"{}"}}]},{"role":"tool","tool_call_id":"` + secondID + `","content":"second output"}`
+	finalRequest := []byte(`{"model":"cursor/auto","session_id":"history","messages":[{"role":"user","content":"use two tools"},` + firstHistory + `,` + secondHistory + `],"tools":` + openCodeChatTools + `}`)
+	finalResponse, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", Format: "openai", OriginalRequest: finalRequest, StorageJSON: auth.StorageJSON})
+	if err != nil || !strings.Contains(string(finalResponse.Payload), `"content":"final:second output"`) {
+		t.Fatalf("final response = %s, %v", finalResponse.Payload, err)
+	}
+}
+
+func TestAdapterStartsFreshTurnAfterCompletedToolHistory(t *testing.T) {
+	adapter, auth := newToolBridgeAdapter(t)
+	initial := []byte(`{"model":"cursor/auto","session_id":"follow-up","messages":[{"role":"user","content":"inspect"}],"tools":` + openCodeChatTools + `}`)
+	first, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", OriginalRequest: initial, StorageJSON: auth.StorageJSON})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paused struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls []struct {
+					ID string `json:"id"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(first.Payload, &paused); err != nil || len(paused.Choices) != 1 || len(paused.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("initial tool response = %s, %v", first.Payload, err)
+	}
+	call := paused.Choices[0].Message.ToolCalls[0]
+	continuation := []byte(`{"model":"cursor/auto","session_id":"follow-up","messages":[{"role":"user","content":"inspect"},{"role":"assistant","content":null,"tool_calls":[{"id":"` + call.ID + `","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"` + call.ID + `","content":"contents"}]}`)
+	if _, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", OriginalRequest: continuation, StorageJSON: auth.StorageJSON}); err != nil {
+		t.Fatal(err)
+	}
+	followUp := []byte(`{"model":"cursor/auto","session_id":"follow-up","messages":[{"role":"user","content":"inspect"},{"role":"assistant","content":null,"tool_calls":[{"id":"` + call.ID + `","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"` + call.ID + `","content":"contents"},{"role":"assistant","content":"final:contents"},{"role":"user","content":"explain"}]}`)
+	response, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", OriginalRequest: followUp, StorageJSON: auth.StorageJSON})
+	if err != nil || !strings.Contains(string(response.Payload), "plain-follow-up") {
+		t.Fatalf("follow-up = %s, %v", response.Payload, err)
+	}
+}
+
+func TestCallerResultEnvelopeAndStopReasonsStayTruthful(t *testing.T) {
+	benign := parseCallerToolResult(`{"error":"not found","code":404}`)
+	if benign.IsError || benign.ExitCode != nil {
+		t.Fatalf("benign JSON result = %#v", benign)
+	}
+	failed := parseCallerToolResult(`{"error":"denied"}`)
+	if !failed.IsError {
+		t.Fatalf("explicit error envelope = %#v", failed)
+	}
+	if got := chatFinishReason("max_tokens"); got != "length" {
+		t.Fatalf("chat max-token finish = %q", got)
+	}
+	response := responsesResponse("turn", "cursor/auto", cursor.ToolTurnEvent{Result: &cursor.Result{Text: "partial", StopReason: "max_turn_requests"}})
+	if response["status"] != "incomplete" {
+		t.Fatalf("Responses stop state = %#v", response)
+	}
+}
+
+func TestAdapterResponsesToolCallAndResultResumeSameTurn(t *testing.T) {
+	adapter, auth := newToolBridgeAdapter(t)
+	initial := []byte(`{"model":"cursor/auto","prompt_cache_key":"response-conversation","input":[{"role":"user","content":[{"type":"input_text","text":"inspect the file"}]}],"tools":` + openCodeResponseTools + `}`)
+	response, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai-response", Format: "openai-response", OriginalRequest: initial, Payload: initial, StorageJSON: auth.StorageJSON})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paused struct {
+		Output []struct {
+			Type      string `json:"type"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(response.Payload, &paused); err != nil {
+		t.Fatal(err)
+	}
+	if len(paused.Output) != 1 || paused.Output[0].Type != "function_call" || paused.Output[0].CallID == "" || paused.Output[0].Name != "read" {
+		t.Fatalf("Responses tool call = %s", response.Payload)
+	}
+	continuation := []byte(`{"model":"cursor/auto","prompt_cache_key":"response-conversation","input":[{"type":"function_call","call_id":"` + paused.Output[0].CallID + `","name":"read","arguments":"{}"},{"type":"function_call_output","call_id":"` + paused.Output[0].CallID + `","output":"response contents"}],"tools":` + openCodeResponseTools + `}`)
+	response, err = adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai-response", Format: "openai-response", OriginalRequest: continuation, Payload: continuation, StorageJSON: auth.StorageJSON})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(response.Payload), `"type":"message"`) || !strings.Contains(string(response.Payload), `"text":"final:response contents"`) {
+		t.Fatalf("Responses final = %s", response.Payload)
+	}
+}
+
+func TestAdapterStreamsProtocolValidToolAndFinalFrames(t *testing.T) {
+	for _, protocol := range []string{"openai", "openai-response"} {
+		t.Run(protocol, func(t *testing.T) {
+			adapter, auth := newToolBridgeAdapter(t)
+			var initial []byte
+			if protocol == "openai" {
+				initial = []byte(`{"model":"cursor/auto","session_id":"stream-chat","stream":true,"messages":[{"role":"user","content":"inspect"}],"tools":` + openCodeChatTools + `}`)
+			} else {
+				initial = []byte(`{"model":"cursor/auto","prompt_cache_key":"stream-response","stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"inspect"}]}],"tools":` + openCodeResponseTools + `}`)
+			}
+			stream, err := adapter.ExecuteStream(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: protocol, Format: protocol, OriginalRequest: initial, Payload: initial, StorageJSON: auth.StorageJSON, Stream: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var chunks strings.Builder
+			for chunk := range stream.Chunks {
+				if chunk.Err != nil {
+					t.Fatal(chunk.Err)
+				}
+				chunks.Write(chunk.Payload)
+			}
+			if protocol == "openai" && (!strings.Contains(chunks.String(), `"finish_reason":"tool_calls"`) || !strings.Contains(chunks.String(), "data: [DONE]")) {
+				t.Fatalf("Chat stream = %s", chunks.String())
+			}
+			if protocol == "openai-response" && (!strings.Contains(chunks.String(), "response.output_item.done") || !strings.Contains(chunks.String(), "response.completed")) {
+				t.Fatalf("Responses stream = %s", chunks.String())
+			}
+		})
+	}
+}
+
+func TestAdapterUsesOriginalProtocolAndFailsClosedOnMalformedMappingsAndResults(t *testing.T) {
+	t.Run("original request wins", func(t *testing.T) {
+		adapter, auth := newToolBridgeAdapter(t)
+		original := []byte(`{"model":"cursor/auto","session_id":"original-source","messages":[{"role":"user","content":"inspect"}],"tools":` + openCodeChatTools + `}`)
+		translated := []byte(`{"messages":[{"role":"user","content":"translated body discarded tools"}]}`)
+		response, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", Format: "openai", OriginalRequest: original, Payload: translated, StorageJSON: auth.StorageJSON})
+		if err != nil || !strings.Contains(string(response.Payload), `"finish_reason":"tool_calls"`) {
+			t.Fatalf("response = %s, %v", response.Payload, err)
+		}
+	})
+
+	t.Run("ambiguous schema", func(t *testing.T) {
+		duplicate := `[{"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{"filePath":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["filePath"]}}},{"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{"filePath":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["filePath"]}}}]`
+		body := []byte(`{"session_id":"ambiguous","messages":[{"role":"user","content":"inspect"}],"tools":` + duplicate + `}`)
+		if _, err := decodeCallerRequest(pluginapi.ExecutorRequest{SourceFormat: "openai", OriginalRequest: body}); cursor.FailureCode(err) != "ambiguous_tool_mapping" {
+			t.Fatalf("ambiguous mapping error = %#v", err)
+		}
+	})
+
+	t.Run("wrong schema", func(t *testing.T) {
+		body := []byte(`{"session_id":"schema","messages":[{"role":"user","content":"inspect"}],"tools":[{"type":"function","function":{"name":"write","parameters":{"type":"object","properties":{"filePath":{"type":"string"},"content":{"type":"number"}},"required":["filePath","content"]}}}]}`)
+		if _, err := decodeCallerRequest(pluginapi.ExecutorRequest{SourceFormat: "openai", OriginalRequest: body}); cursor.FailureCode(err) != "unsupported_tool_schema" {
+			t.Fatalf("schema error = %#v", err)
+		}
+	})
+
+	t.Run("unproducible required field", func(t *testing.T) {
+		body := []byte(`{"session_id":"schema-required","messages":[{"role":"user","content":"run"}],"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"},"workdir":{"type":"string"},"description":{"type":"string"}},"required":["command","description"]}}}]}`)
+		if _, err := decodeCallerRequest(pluginapi.ExecutorRequest{SourceFormat: "openai", OriginalRequest: body}); cursor.FailureCode(err) != "unsupported_tool_schema" {
+			t.Fatalf("required field error = %#v", err)
+		}
+	})
+
+	t.Run("malformed result", func(t *testing.T) {
+		body := []byte(`{"session_id":"result","messages":[{"role":"tool","content":"missing id"}],"tools":` + openCodeChatTools + `}`)
+		if _, err := decodeCallerRequest(pluginapi.ExecutorRequest{SourceFormat: "openai", OriginalRequest: body}); cursor.FailureCode(err) != "malformed_tool_result" {
+			t.Fatalf("malformed result error = %#v", err)
+		}
+	})
+}
+
+func TestAdapterFailedOpenCodeToolResultRefusesACPCallback(t *testing.T) {
+	adapter, auth := newToolBridgeAdapter(t)
+	initial := []byte(`{"model":"cursor/auto","session_id":"denied","messages":[{"role":"user","content":"inspect"}],"tools":` + openCodeChatTools + `}`)
+	response, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", Format: "openai", OriginalRequest: initial, StorageJSON: auth.StorageJSON})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paused struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls []struct {
+					ID string `json:"id"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(response.Payload, &paused); err != nil {
+		t.Fatal(err)
+	}
+	callID := paused.Choices[0].Message.ToolCalls[0].ID
+	denied := []byte(`{"model":"cursor/auto","session_id":"denied","messages":[{"role":"tool","tool_call_id":"` + callID + `","content":"{\"error\":\"permission denied\",\"content\":[]}"}],"tools":` + openCodeChatTools + `}`)
+	if _, err := adapter.Execute(context.Background(), pluginapi.ExecutorRequest{AuthID: auth.ID, Model: "cursor/auto", SourceFormat: "openai", Format: "openai", OriginalRequest: denied, StorageJSON: auth.StorageJSON}); err == nil {
+		t.Fatal("failed OpenCode tool result resumed the ACP callback")
 	}
 }
 

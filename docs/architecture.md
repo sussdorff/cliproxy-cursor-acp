@@ -84,8 +84,11 @@ and cancellation flow. The SDK's optional usage object becomes observed usage
 only. ACP context usage is not a Cursor subscription quota.
 
 The native plugin entrypoint speaks CLIProxyAPI's public ABI. It registers auth,
-model, executor, usage, and management capabilities. The executor accepts a
-canonical OpenAI chat payload. A host `derived_session_id`, then
+model, executor, usage, and management capabilities. The executor accepts
+OpenAI Chat Completions and Responses in streaming and non-streaming form. It
+decodes caller tools and results from `ExecutorRequest.OriginalRequest` and
+`SourceFormat`; the translated payload is not allowed to erase the caller's
+protocol. A host `derived_session_id`, then
 `execution_session_id`, supplies affinity. Explicit payload `session_id`,
 `conversation_id`, and `prompt_cache_key` are the fallback. Otherwise it creates
 a cryptographically random stateless turn key so identical requests from
@@ -96,6 +99,68 @@ workspace root. The host-selected `AuthID` is mandatory.
 Stateless turns close their ACP session at completion and remove both account
 session and conversation-affinity entries. Stable host session identities reuse
 their account-scoped ACP session.
+
+## Caller-owned tool bridge
+
+The tool bridge is a two-request continuation protocol around one live ACP
+prompt. The initial HTTP request can finish while the ACP prompt goroutine stays
+blocked on its callback:
+
+```text
+OpenCode request                   official Cursor ACP prompt
+      |                                      |
+      | tools + prompt                       |
+      +------------ StartTurn -------------->|
+                                             | fs/read_text_file
+      <----- OpenAI function call -----------+
+
+OpenCode executes locally under its permission policy
+
+      | tool result                          | same blocked callback
+      +------------ ResumeTurn ------------->|
+                                             | callback response
+      <----- next tool call or final text ----+
+```
+
+Relative filesystem paths and terminal working directories are resolved below
+`workspace_root`; anything outside that lexical boundary is refused. OpenCode
+and the ACP process must therefore share the resulting absolute workspace path
+namespace; the bridge deliberately has no host or container path mapper.
+
+Paused prompts retain their global concurrency permit and their selected
+account's serialized ACP turn permit. This keeps the existing process and
+scheduler bounds authoritative while the callback is outstanding; operators
+must configure `max_concurrent` for their intended number of pending prompts.
+
+`StartTurn` creates a background context bounded by the configured timeout, not
+by the lifetime of the HTTP handler that returned the tool call. The pending
+turn holds the selected `AuthID`, conversation, account process generation, ACP
+session ID, monotonically increasing turn generation, and exact supported tool
+map. Every callback receives a cryptographically random opaque call ID. A result
+is checked against every binding and removed atomically before delivery, so it
+is consumed exactly once. Wrong-account and wrong-conversation attempts do not
+consume the valid pending call; duplicate, stale, malformed, or generation-
+mismatched results are refused.
+
+The only mappings are OpenCode `read`, `write`, and `bash`. The adapter validates
+their documented schemas from the original request and converts ACP arguments
+without inspecting the named files. A `bash` result becomes an in-memory
+synthetic ACP terminal scoped to the active turn; subsequent output, exit, wait,
+kill, and release callbacks read or erase only that result. No plugin process
+executes the command. Environment overrides are refused because OpenCode's
+documented `bash` schema has no exact field for them.
+
+ACP permission callbacks are cancelled so the plugin never authorizes an
+agent-owned operation. Filesystem and terminal client callbacks take the
+separate caller-owned path above. OpenCode remains the outer permission
+boundary, and its denied or failed result aborts that callback and invalidates
+the affected ACP process.
+
+The same event is rendered directly into the caller's protocol. Chat
+Completions uses `tool_calls` plus `finish_reason: tool_calls`; Responses uses a
+completed `function_call` output item. Streaming emits protocol-valid SSE tool
+and final-message events. Cursor usage is present only on the final result and
+is omitted from paused tool-call events when ACP supplied none.
 
 ## Managed installer
 
@@ -138,4 +203,5 @@ configuration, missing `AuthID`, and invalid request shape are fatal errors and
 do not cause a different account to be used silently.
 
 Plugin shutdown terminates every unfinished login, removes its private profile
-directory, and closes every account-owned ACP process group.
+directory, cancels every pending tool callback, erases its call and synthetic
+terminal state, and closes every account-owned ACP process group.

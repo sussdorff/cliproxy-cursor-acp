@@ -29,6 +29,7 @@ type Result struct {
 	Text         string
 	InputTokens  int64
 	OutputTokens int64
+	StopReason   string
 }
 
 type accountRuntime struct {
@@ -38,21 +39,27 @@ type accountRuntime struct {
 	inputTokens  int64
 	outputTokens int64
 	turn         chan struct{}
+	generation   uint64
 }
 
 // Service keeps every ACP process and ACP session inside the selected AuthID.
 // It intentionally has no account-selection algorithm: CLIProxyAPI owns that.
 // Accounts arrive at runtime from login completion and stored auth records.
 type Service struct {
-	mu               sync.Mutex
-	accounts         map[string]*accountRuntime
-	conversationAuth map[string]string
-	factory          Factory
-	paths            *Paths
-	sem              chan struct{}
-	maxPromptBytes   int
-	timeout          time.Duration
-	quota            QuotaProvider
+	mu                 sync.Mutex
+	accounts           map[string]*accountRuntime
+	conversationAuth   map[string]string
+	factory            Factory
+	paths              *Paths
+	sem                chan struct{}
+	maxPromptBytes     int
+	maxToolResultBytes int
+	timeout            time.Duration
+	quota              QuotaProvider
+	pendingTurns       map[string]*pendingToolTurn
+	pendingCalls       map[string]*pendingToolCall
+	nextTurn           uint64
+	closed             bool
 }
 
 // Factory starts a new ACP peer using the selected account only.
@@ -64,6 +71,7 @@ type Factory interface {
 type ACPClient interface {
 	NewSession(context.Context, string) (string, error)
 	Prompt(context.Context, string, string) (Result, error)
+	PromptWithTools(context.Context, string, string, ToolHandler) (Result, error)
 	CloseSession(context.Context, string) error
 	Close() error
 }
@@ -88,7 +96,7 @@ func NewService(config Config, paths *Paths, factory Factory, options ...Service
 	if paths == nil {
 		return nil, fmt.Errorf("plugin paths are required")
 	}
-	service := &Service{accounts: make(map[string]*accountRuntime), conversationAuth: make(map[string]string), factory: factory, paths: paths, sem: make(chan struct{}, config.MaxConcurrent), maxPromptBytes: config.MaxPromptBytes, timeout: config.Timeout, quota: NewUsageSummaryClient()}
+	service := &Service{accounts: make(map[string]*accountRuntime), conversationAuth: make(map[string]string), factory: factory, paths: paths, sem: make(chan struct{}, config.MaxConcurrent), maxPromptBytes: config.MaxPromptBytes, maxToolResultBytes: config.MaxOutputBytes, timeout: config.Timeout, quota: NewUsageSummaryClient(), pendingTurns: make(map[string]*pendingToolTurn), pendingCalls: make(map[string]*pendingToolCall)}
 	for _, option := range options {
 		if option != nil {
 			option(service)
@@ -235,6 +243,10 @@ func (s *Service) Workspace() (string, error) { return s.paths.Workspace() }
 
 // Execute starts or reuses the ACP session for exactly the selected AuthID.
 func (s *Service) Execute(ctx context.Context, request Request) (Result, error) {
+	return s.execute(ctx, request, nil, nil)
+}
+
+func (s *Service) execute(ctx context.Context, request Request, handler ToolHandler, turn *pendingToolTurn) (Result, error) {
 	if request.AuthID == "" {
 		return Result{}, fatal("missing_auth", fmt.Errorf("CLIProxyAPI must select AuthID before Cursor ACP execution"))
 	}
@@ -310,7 +322,18 @@ func (s *Service) Execute(ctx context.Context, request Request) (Result, error) 
 	if request.Stateless {
 		defer s.releaseStateless(request.AuthID, request.ConversationID, client, sessionID)
 	}
-	result, err := client.Prompt(executionCtx, sessionID, request.Prompt)
+	if turn != nil {
+		s.mu.Lock()
+		turn.processGen = runtime.generation
+		turn.sessionID = sessionID
+		s.mu.Unlock()
+	}
+	var result Result
+	if handler == nil {
+		result, err = client.Prompt(executionCtx, sessionID, request.Prompt)
+	} else {
+		result, err = client.PromptWithTools(executionCtx, sessionID, request.Prompt, handler)
+	}
 	if err != nil {
 		if executionCtx.Err() != nil {
 			s.invalidate(request.AuthID, client)
@@ -353,6 +376,7 @@ func (s *Service) ensureAccountClient(ctx context.Context, runtime *accountRunti
 	s.mu.Lock()
 	if runtime.client == nil {
 		runtime.client = client
+		runtime.generation++
 		s.mu.Unlock()
 		return client, nil
 	}
@@ -387,10 +411,244 @@ func (s *Service) invalidate(authID string, client ACPClient) {
 	runtime := s.accounts[authID]
 	if runtime != nil && runtime.client == client {
 		runtime.client = nil
+		runtime.generation++
 		runtime.sessions = make(map[string]string)
 	}
 	s.mu.Unlock()
 	_ = client.Close()
+}
+
+// StartTurn starts one bounded ACP turn independently of the initiating HTTP
+// request. It returns at the next caller-owned tool pause or final result.
+func (s *Service) StartTurn(ctx context.Context, request ToolTurnRequest) (ToolTurnEvent, error) {
+	if err := ctx.Err(); err != nil {
+		return ToolTurnEvent{}, retryable("request_cancelled", err)
+	}
+	if len(request.Tools) == 0 {
+		return ToolTurnEvent{}, fatal("missing_tools", fmt.Errorf("caller tool definitions are required"))
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ToolTurnEvent{}, retryable("service_closed", fmt.Errorf("Cursor ACP service is closed"))
+	}
+	if existing := s.pendingTurns[request.Request.ConversationID]; existing != nil {
+		s.mu.Unlock()
+		return ToolTurnEvent{}, fatal("turn_already_pending", fmt.Errorf("conversation already has a pending ACP turn"))
+	}
+	s.nextTurn++
+	turnCtx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	turn := &pendingToolTurn{authID: request.Request.AuthID, conversationID: request.Request.ConversationID, generation: s.nextTurn, tools: cloneToolNames(request.Tools), ctx: turnCtx, cancel: cancel, events: make(chan toolTurnOutcome, 1)}
+	s.pendingTurns[turn.conversationID] = turn
+	s.mu.Unlock()
+	go s.runToolTurn(request.Request, turn)
+	return s.awaitToolTurn(ctx, turn)
+}
+
+// ResumeTurn consumes one opaque result exactly once and resumes only the ACP
+// callback that created it.
+func (s *Service) ResumeTurn(ctx context.Context, submission ToolResultSubmission) (ToolTurnEvent, error) {
+	if submission.CallID == "" {
+		return ToolTurnEvent{}, fatal("malformed_tool_result", fmt.Errorf("tool call ID is required"))
+	}
+	s.mu.Lock()
+	call := s.pendingCalls[submission.CallID]
+	if call == nil {
+		s.mu.Unlock()
+		return ToolTurnEvent{}, fatal("unknown_tool_call", fmt.Errorf("tool call is unknown, stale, or already consumed"))
+	}
+	turn := call.turn
+	if turn.authID != submission.AuthID || (submission.ConversationID != "" && turn.conversationID != submission.ConversationID) {
+		s.mu.Unlock()
+		return ToolTurnEvent{}, fatal("tool_result_mismatch", fmt.Errorf("tool result does not match its AuthID and conversation"))
+	}
+	runtime := s.accounts[turn.authID]
+	currentTurn := s.pendingTurns[turn.conversationID]
+	if runtime == nil || runtime.generation != call.processGen || runtime.sessions[turn.conversationID] != call.sessionID || currentTurn != turn || turn.generation != call.turnGen || turn.ctx.Err() != nil {
+		delete(s.pendingCalls, submission.CallID)
+		s.mu.Unlock()
+		return ToolTurnEvent{}, fatal("stale_tool_call", fmt.Errorf("tool result belongs to an expired ACP turn"))
+	}
+	if len(submission.Result.Output) > s.maxToolResultBytes {
+		delete(s.pendingCalls, submission.CallID)
+		turn.cancel()
+		s.mu.Unlock()
+		return ToolTurnEvent{}, fatal("tool_result_too_large", fmt.Errorf("caller tool result exceeds configured maximum"))
+	}
+	delete(s.pendingCalls, submission.CallID)
+	s.mu.Unlock()
+	select {
+	case call.result <- submission.Result:
+	case <-turn.ctx.Done():
+		return ToolTurnEvent{}, retryable("turn_cancelled", turn.ctx.Err())
+	case <-ctx.Done():
+		turn.cancel()
+		return ToolTurnEvent{}, retryable("request_cancelled", ctx.Err())
+	}
+	return s.awaitToolTurn(ctx, turn)
+}
+
+func (s *Service) runToolTurn(request Request, turn *pendingToolTurn) {
+	result, err := s.execute(turn.ctx, request, boundToolHandler{service: s, turn: turn}, turn)
+	outcome := toolTurnOutcome{err: err, final: true}
+	if err == nil {
+		outcome.event = ToolTurnEvent{ConversationID: turn.conversationID, Result: &result}
+	}
+	select {
+	case turn.events <- outcome:
+	case <-turn.ctx.Done():
+	}
+	s.finishToolTurn(turn)
+}
+
+func (s *Service) handleToolCall(ctx context.Context, turn *pendingToolTurn, request ToolRequest) (ToolResult, error) {
+	request, err := s.confineToolRequest(turn.authID, request)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	name := turn.tools[request.Kind]
+	if name == "" {
+		return ToolResult{}, fmt.Errorf("caller did not provide an exact mapping for ACP %s", request.Kind)
+	}
+	callID, err := opaqueToolCallID()
+	if err != nil {
+		return ToolResult{}, err
+	}
+	call := &pendingToolCall{turn: turn, turnGen: turn.generation, processGen: turn.processGen, sessionID: turn.sessionID, result: make(chan ToolResult, 1)}
+	s.mu.Lock()
+	if s.pendingTurns[turn.conversationID] != turn || turn.ctx.Err() != nil {
+		s.mu.Unlock()
+		return ToolResult{}, fmt.Errorf("ACP turn expired before its tool callback")
+	}
+	s.pendingCalls[callID] = call
+	s.mu.Unlock()
+	select {
+	case turn.events <- toolTurnOutcome{event: ToolTurnEvent{ConversationID: turn.conversationID, ToolCall: &ToolCall{ID: callID, Name: name, Request: request}}}:
+	case <-turn.ctx.Done():
+		s.removePendingCall(callID, call)
+		return ToolResult{}, turn.ctx.Err()
+	case <-ctx.Done():
+		s.removePendingCall(callID, call)
+		return ToolResult{}, ctx.Err()
+	}
+	select {
+	case result := <-call.result:
+		if result.IsError {
+			return ToolResult{}, fmt.Errorf("caller refused or failed the ACP tool operation")
+		}
+		return result, nil
+	case <-turn.ctx.Done():
+		s.removePendingCall(callID, call)
+		return ToolResult{}, turn.ctx.Err()
+	case <-ctx.Done():
+		s.removePendingCall(callID, call)
+		return ToolResult{}, ctx.Err()
+	}
+}
+
+func (s *Service) confineToolRequest(authID string, request ToolRequest) (ToolRequest, error) {
+	workspace, err := s.paths.Workspace()
+	if err != nil {
+		return ToolRequest{}, err
+	}
+	switch request.Kind {
+	case ToolRead, ToolWrite:
+		request.Path, err = confinedPath(workspace, request.Path)
+		if err != nil {
+			return ToolRequest{}, fmt.Errorf("ACP filesystem callback is outside the caller workspace")
+		}
+	case ToolShell:
+		request.WorkingDir, err = confinedPath(workspace, request.WorkingDir)
+		if err != nil {
+			return ToolRequest{}, fmt.Errorf("ACP terminal working directory is outside the caller workspace")
+		}
+		profilesRoot, profilesErr := s.paths.ProfilesRoot()
+		if profilesErr != nil {
+			return ToolRequest{}, profilesErr
+		}
+		s.mu.Lock()
+		runtime := s.accounts[authID]
+		profileDir := ""
+		if runtime != nil {
+			profileDir = runtime.account.ProfileDir
+		}
+		s.mu.Unlock()
+		for _, value := range append([]string{request.Command}, request.Args...) {
+			if strings.Contains(value, profilesRoot) || (profileDir != "" && strings.Contains(value, profileDir)) {
+				return ToolRequest{}, fmt.Errorf("ACP terminal callback references private account state")
+			}
+		}
+	default:
+		return ToolRequest{}, fmt.Errorf("unsupported ACP caller-owned tool")
+	}
+	return request, nil
+}
+
+func confinedPath(workspace, candidate string) (string, error) {
+	if strings.TrimSpace(candidate) == "" {
+		candidate = workspace
+	} else if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(workspace, candidate)
+	}
+	candidate = filepath.Clean(candidate)
+	relative, err := filepath.Rel(workspace, candidate)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes workspace")
+	}
+	return candidate, nil
+}
+
+type boundToolHandler struct {
+	service *Service
+	turn    *pendingToolTurn
+}
+
+func (h boundToolHandler) Call(ctx context.Context, request ToolRequest) (ToolResult, error) {
+	return h.service.handleToolCall(ctx, h.turn, request)
+}
+
+func (s *Service) awaitToolTurn(ctx context.Context, turn *pendingToolTurn) (ToolTurnEvent, error) {
+	select {
+	case outcome := <-turn.events:
+		if outcome.final {
+			turn.cancel()
+		}
+		return outcome.event, outcome.err
+	case <-turn.ctx.Done():
+		return ToolTurnEvent{}, retryable("turn_cancelled", turn.ctx.Err())
+	case <-ctx.Done():
+		turn.cancel()
+		return ToolTurnEvent{}, retryable("request_cancelled", ctx.Err())
+	}
+}
+
+func (s *Service) finishToolTurn(turn *pendingToolTurn) {
+	s.mu.Lock()
+	if s.pendingTurns[turn.conversationID] == turn {
+		delete(s.pendingTurns, turn.conversationID)
+	}
+	for id, call := range s.pendingCalls {
+		if call.turn == turn {
+			delete(s.pendingCalls, id)
+		}
+	}
+	s.mu.Unlock()
+}
+
+func (s *Service) removePendingCall(id string, call *pendingToolCall) {
+	s.mu.Lock()
+	if s.pendingCalls[id] == call {
+		delete(s.pendingCalls, id)
+	}
+	s.mu.Unlock()
+}
+
+func cloneToolNames(source ToolNames) ToolNames {
+	result := make(ToolNames, len(source))
+	for kind, name := range source {
+		result[kind] = name
+	}
+	return result
 }
 
 func classifyACPError(code string, err error) error {
@@ -408,11 +666,23 @@ func classifyACPError(code string, err error) error {
 // process across AuthIDs and is safe to call repeatedly.
 func (s *Service) Close() error {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	turns := make([]*pendingToolTurn, 0, len(s.pendingTurns))
+	for _, turn := range s.pendingTurns {
+		turns = append(turns, turn)
+	}
 	runtimes := make([]*accountRuntime, 0, len(s.accounts))
 	for _, runtime := range s.accounts {
 		runtimes = append(runtimes, runtime)
 	}
 	s.mu.Unlock()
+	for _, turn := range turns {
+		turn.cancel()
+	}
 	for _, runtime := range runtimes {
 		runtime.turn <- struct{}{}
 	}
@@ -431,6 +701,8 @@ func (s *Service) Close() error {
 		}
 	}
 	s.conversationAuth = make(map[string]string)
+	s.pendingTurns = make(map[string]*pendingToolTurn)
+	s.pendingCalls = make(map[string]*pendingToolCall)
 	s.mu.Unlock()
 	var joined error
 	for _, client := range clients {
