@@ -58,13 +58,45 @@ type adapterState struct {
 	login   *cursor.Login
 }
 
+// nativeExecutorStreamRequest mirrors CLIProxyAPI's native plugin RPC wrapper.
+// The host owns StreamID and HostCallbackID; only StreamID is needed to emit
+// the adapter's response back through the native stream bridge.
+type nativeExecutorStreamRequest struct {
+	pluginapi.ExecutorRequest
+	StreamID       string `json:"stream_id"`
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+type executorStreamAcknowledgement struct {
+	Headers http.Header `json:"headers,omitempty"`
+}
+
+type streamEmitRequest struct {
+	StreamID string `json:"stream_id"`
+	Payload  []byte `json:"payload,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+type streamCloseRequest struct {
+	StreamID string `json:"stream_id"`
+	Error    string `json:"error,omitempty"`
+}
+
 var state struct {
 	sync.Mutex
 	adapterState
 }
 
 func dispatch(method string, raw []byte) ([]byte, bool) {
-	value, err := dispatchValue(method, raw)
+	var (
+		value any
+		err   error
+	)
+	if method == pluginabi.MethodExecutorExecuteStream {
+		value, err = dispatchNativeExecutorStream(raw)
+	} else {
+		value, err = dispatchValue(method, raw)
+	}
 	if err != nil {
 		code, message, status, canRetry := publicError(err)
 		return errorEnvelopeStatus(code, message, status, canRetry), true
@@ -121,6 +153,84 @@ func errorAs(err error, target *cursor.Failure) bool {
 		err = value.Unwrap()
 	}
 	return false
+}
+
+func dispatchNativeExecutorStream(raw []byte) (executorStreamAcknowledgement, error) {
+	lease, err := acquireNativeStreamLease()
+	if err != nil {
+		return executorStreamAcknowledgement{}, err
+	}
+	acknowledgement, err := dispatchNativeExecutorStreamWithHost(raw, lease.callHost, lease.finish)
+	if err != nil {
+		lease.finish(nil)
+		return executorStreamAcknowledgement{}, err
+	}
+	return acknowledgement, nil
+}
+
+func dispatchNativeExecutorStreamWithHost(raw []byte, callHost func(string, []byte) error, complete func(error)) (executorStreamAcknowledgement, error) {
+	var request nativeExecutorStreamRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return executorStreamAcknowledgement{}, err
+	}
+	if request.StreamID == "" {
+		return executorStreamAcknowledgement{}, fmt.Errorf("stream id is required")
+	}
+	state.Lock()
+	adapter := state.adapter
+	state.Unlock()
+	if adapter == nil {
+		return executorStreamAcknowledgement{}, fmt.Errorf("plugin is not configured")
+	}
+	response, err := adapter.ExecuteStream(context.Background(), request.ExecutorRequest)
+	if err != nil {
+		return executorStreamAcknowledgement{}, err
+	}
+	forwardNativeStream(request.StreamID, response.Chunks, callHost, complete)
+	return executorStreamAcknowledgement{Headers: response.Headers}, nil
+}
+
+func forwardNativeStream(streamID string, chunks <-chan pluginapi.ExecutorStreamChunk, callHost func(string, []byte) error, complete func(error)) {
+	go func() {
+		closeRequest := streamCloseRequest{StreamID: streamID}
+		var forwardError error
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				closeRequest.Error = "Cursor stream bridge failed"
+				forwardError = fmt.Errorf("native stream bridge panic")
+			}
+			raw, err := json.Marshal(closeRequest)
+			if err != nil {
+				forwardError = fmt.Errorf("encode native stream close: %w", err)
+			} else if err := callHost(pluginabi.MethodHostStreamClose, raw); err != nil {
+				forwardError = fmt.Errorf("close native stream: %w", err)
+			}
+			if complete != nil {
+				complete(forwardError)
+			}
+		}()
+		if chunks != nil {
+			for chunk := range chunks {
+				if closeRequest.Error != "" {
+					continue
+				}
+				emitRequest := streamEmitRequest{StreamID: streamID, Payload: chunk.Payload}
+				if chunk.Err != nil {
+					emitRequest.Error = "Cursor stream failed"
+				}
+				raw, err := json.Marshal(emitRequest)
+				if err != nil {
+					closeRequest.Error = "Cursor stream bridge failed"
+					forwardError = fmt.Errorf("encode native stream emit: %w", err)
+					continue
+				}
+				if err := callHost(pluginabi.MethodHostStreamEmit, raw); err != nil {
+					closeRequest.Error = "Cursor stream bridge failed"
+					forwardError = fmt.Errorf("emit native stream: %w", err)
+				}
+			}
+		}
+	}()
 }
 
 func dispatchValue(method string, raw []byte) (any, error) {
@@ -187,12 +297,6 @@ func dispatchValue(method string, raw []byte) (any, error) {
 			return nil, err
 		}
 		return adapter.Execute(ctx, request)
-	case pluginabi.MethodExecutorExecuteStream:
-		var request pluginapi.ExecutorRequest
-		if err := json.Unmarshal(raw, &request); err != nil {
-			return nil, err
-		}
-		return adapter.ExecuteStream(ctx, request)
 	case pluginabi.MethodExecutorCountTokens:
 		var request pluginapi.ExecutorRequest
 		if err := json.Unmarshal(raw, &request); err != nil {
