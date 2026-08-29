@@ -1125,27 +1125,27 @@ func TestPluginQuotaContractMapsCodexBarWindows(t *testing.T) {
 			},
 		},
 	})
-	if contract.Availability != pluginQuotaAvailable || len(contract.Windows) != 4 {
+	if contract.Availability != pluginQuotaAvailable || len(contract.Windows) != 3 {
 		t.Fatalf("contract = %#v", contract)
 	}
 	ids := make([]string, 0, len(contract.Windows))
 	for _, window := range contract.Windows {
 		ids = append(ids, window.ID)
-		if window.UsedPercent == nil || window.ResetAt == "" {
+		if window.UsedPercent == nil {
 			t.Fatalf("window %q is incomplete: %#v", window.ID, window)
 		}
 	}
 	if contract.Spend == nil || contract.Spend.MeteredCents == nil || *contract.Spend.MeteredCents != 98655 {
 		t.Fatalf("spend = %#v", contract.Spend)
 	}
-	if len(contract.Daily) != 2 || contract.Daily[0].Date != "2026-08-26" {
-		t.Fatalf("daily = %#v", contract.Daily)
-	}
-	if strings.Join(ids, ",") != "total,cursor,third_party,grok_bot" {
+	if strings.Join(ids, ",") != "cursor,third_party,grok_bot" {
 		t.Fatalf("window ids = %v", ids)
 	}
-	if contract.Windows[0].Unit != "cents" || contract.Windows[0].Used == nil || *contract.Windows[0].Used != 37146 {
-		t.Fatalf("total window = %#v", contract.Windows[0])
+	if contract.Windows[0].ResetAt == "" || contract.Windows[0].WindowStart == "" {
+		t.Fatalf("cursor must remain the interval window: %#v", contract.Windows[0])
+	}
+	if contract.Windows[1].ResetAt != "" || contract.Windows[2].ResetAt != "" {
+		t.Fatalf("satellite windows must omit interval boundaries: %#v %#v", contract.Windows[1], contract.Windows[2])
 	}
 	if contract.Windows[1].Used != nil || contract.Windows[2].Used != nil {
 		t.Fatalf("split windows must stay percent-only: %#v %#v", contract.Windows[1], contract.Windows[2])

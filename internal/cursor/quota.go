@@ -22,8 +22,8 @@ var cursorSessionValue = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 // Credential material is deliberately absent from this value.
 //
 // Used/Limit/Remaining describe the included plan total (Cursor reports those
-// counts in cents on token-priced plans). Windows holds the CodexBar-style
-// breakdown: Total, Cursor (auto), Third Party (API), and optionally Grok Bot.
+// counts in cents on token-priced plans). Windows holds the display breakdown:
+// Cursor (auto) as the main allowance, Third Party (API), and optionally Grok Bot.
 type Quota struct {
 	Available      bool
 	WindowStart    string
@@ -324,19 +324,6 @@ func parseUsageSummary(body []byte) (Quota, bool) {
 		MembershipType: summary.MembershipType, LimitType: summary.LimitType, Unlimited: summary.IsUnlimited,
 		Used: plan.Used.value, Limit: plan.Limit.value, Remaining: plan.Remaining.value,
 	}
-	total := QuotaWindow{
-		ID: "total", Label: "Total", Kind: kind, Unit: "cents",
-		Used: plan.Used.value, Limit: plan.Limit.value, Remaining: plan.Remaining.value, HasCounts: true,
-		Unlimited: summary.IsUnlimited, WindowStart: summary.BillingCycleStart, WindowEnd: summary.BillingCycleEnd,
-	}
-	if summary.IsUnlimited {
-		// An unlimited plan has no meaningful utilization percentage.
-	} else if plan.TotalPercentUsed.set {
-		total.UsedPercent, total.HasUsedPercent = clampPercent(plan.TotalPercentUsed.value)
-	} else if plan.Limit.value > 0 {
-		total.UsedPercent, total.HasUsedPercent = clampPercent(float64(plan.Used.value) / float64(plan.Limit.value) * 100)
-	}
-	quota.Windows = []QuotaWindow{total}
 	if percent, ok := optionalPercent(plan.AutoPercentUsed); ok {
 		quota.Windows = append(quota.Windows, QuotaWindow{
 			ID: "cursor", Label: "Cursor", Kind: kind, HasUsedPercent: true, UsedPercent: percent,
@@ -346,7 +333,6 @@ func parseUsageSummary(body []byte) (Quota, bool) {
 	if percent, ok := optionalPercent(plan.APIPercentUsed); ok {
 		quota.Windows = append(quota.Windows, QuotaWindow{
 			ID: "third_party", Label: "Third Party", Kind: kind, HasUsedPercent: true, UsedPercent: percent,
-			WindowStart: summary.BillingCycleStart, WindowEnd: summary.BillingCycleEnd,
 		})
 	}
 	return quota, true
@@ -375,9 +361,8 @@ func parseSandUsage(body []byte) (QuotaWindow, bool) {
 		return QuotaWindow{}, false
 	}
 	return QuotaWindow{
-		ID: "grok_bot", Label: "Grok Bot", Kind: "weekly",
+		ID: "grok_bot", Label: "Grok Bot", Kind: "product",
 		HasUsedPercent: true, UsedPercent: percent,
-		WindowStart: status.CurrentPeriodStart, WindowEnd: status.NextResetTimestampUTC,
 	}, true
 }
 

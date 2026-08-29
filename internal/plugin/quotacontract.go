@@ -41,7 +41,6 @@ const (
 // unsafeDisplayText strips control characters from provider-supplied labels so
 // a manager UI never renders upstream text verbatim.
 var unsafeDisplayText = regexp.MustCompile(`[[:cntrl:]]+`)
-var pluginQuotaDay = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
 // pluginQuotaContract is the versioned, provider-neutral payload.
 type pluginQuotaContract struct {
@@ -53,7 +52,6 @@ type pluginQuotaContract struct {
 	TTLSeconds   int                 `json:"ttl_seconds"`
 	Windows      []pluginQuotaWindow `json:"windows"`
 	Spend        *pluginQuotaSpend   `json:"spend,omitempty"`
-	Daily        []pluginQuotaDaily  `json:"daily,omitempty"`
 }
 
 // pluginQuotaSpend is the optional CodexBar-style cost summary. All money
@@ -66,13 +64,6 @@ type pluginQuotaSpend struct {
 	LatestTokens *int64 `json:"latest_tokens,omitempty"`
 	PeriodTokens *int64 `json:"period_tokens,omitempty"`
 	PeriodDays   int    `json:"period_days,omitempty"`
-}
-
-// pluginQuotaDaily is one UTC day for the cost histogram.
-type pluginQuotaDaily struct {
-	Date      string `json:"date"`
-	CostCents int64  `json:"cost_cents"`
-	Tokens    int64  `json:"tokens,omitempty"`
 }
 
 // pluginQuotaWindow is one normalized quota window. Identity is `id`; every
@@ -119,9 +110,6 @@ func buildPluginQuotaContract(providerID string, metadata cursor.Metadata) plugi
 	if spend, ok := contractSpend(metadata.Quota.Spend); ok {
 		contract.Spend = spend
 	}
-	if daily := contractDaily(metadata.Quota.Daily); len(daily) > 0 {
-		contract.Daily = daily
-	}
 	return contract
 }
 
@@ -157,37 +145,50 @@ func contractSpend(spend *cursor.QuotaSpend) (*pluginQuotaSpend, bool) {
 	return out, true
 }
 
-func contractDaily(days []cursor.QuotaDaily) []pluginQuotaDaily {
-	out := make([]pluginQuotaDaily, 0, len(days))
-	for _, day := range days {
-		date := displayText(day.Date)
-		if !pluginQuotaDay.MatchString(date) || day.CostCents < 0 || day.Tokens < 0 {
+// contractWindows maps the observed Cursor allowances. Cursor is the main
+// interval window; satellite allowances (Third Party, Grok Bot) are published
+// without boundaries so a generic UI can render them as other quota items.
+// The included-plan Total window and daily histogram are not published.
+func contractWindows(quota cursor.Quota) []pluginQuotaWindow {
+	windows := make([]pluginQuotaWindow, 0, len(quota.Windows))
+	for _, observed := range quota.Windows {
+		if displayText(observed.ID) == "total" {
 			continue
 		}
-		out = append(out, pluginQuotaDaily{Date: date, CostCents: day.CostCents, Tokens: day.Tokens})
+		window, ok := observedWindow(observed)
+		if !ok {
+			continue
+		}
+		if !isPrimaryQuotaWindow(window.ID) {
+			window.WindowStart = ""
+			window.WindowEnd = ""
+			window.ResetAt = ""
+			window.ResetAccuracy = "unknown"
+		}
+		windows = append(windows, window)
 	}
-	return out
+	if !hasPrimaryQuotaWindow(windows) {
+		if window, ok := subscriptionWindow(quota); ok {
+			windows = append([]pluginQuotaWindow{window}, windows...)
+		}
+	}
+	if len(windows) == 0 {
+		return nil
+	}
+	return windows
 }
 
-// contractWindows maps the observed Cursor allowances. A CodexBar-style
-// breakdown (Total / Cursor / Third Party / Grok Bot) is preferred when the
-// reader produced it; otherwise the legacy single billing-cycle window is used.
-func contractWindows(quota cursor.Quota) []pluginQuotaWindow {
-	if len(quota.Windows) > 0 {
-		windows := make([]pluginQuotaWindow, 0, len(quota.Windows))
-		for _, observed := range quota.Windows {
-			window, ok := observedWindow(observed)
-			if !ok {
-				continue
-			}
-			windows = append(windows, window)
+func isPrimaryQuotaWindow(id string) bool {
+	return id == "cursor" || id == "subscription"
+}
+
+func hasPrimaryQuotaWindow(windows []pluginQuotaWindow) bool {
+	for _, window := range windows {
+		if isPrimaryQuotaWindow(window.ID) {
+			return true
 		}
-		return windows
 	}
-	if window, ok := subscriptionWindow(quota); ok {
-		return []pluginQuotaWindow{window}
-	}
-	return nil
+	return false
 }
 
 func observedWindow(observed cursor.QuotaWindow) (pluginQuotaWindow, bool) {
