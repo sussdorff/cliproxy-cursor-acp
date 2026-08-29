@@ -7,7 +7,7 @@
       "description": "Use Cursor subscription accounts through CLIProxyAPI by running the official Cursor Agent CLI in ACP mode. Accounts are onboarded with the standard OAuth login card.",
       "author": "Malte Sussdorff",
       "repository": "https://github.com/sussdorff/cliproxy-cursor-acp",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "license": "MIT",
       "homepage": "https://github.com/sussdorff/cliproxy-cursor-acp",
       "tags": ["Provider", "Cursor", "OAuth"]
