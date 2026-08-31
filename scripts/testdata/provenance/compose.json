@@ -1,0 +1,1 @@
+{"services":{"cli-proxy-api":{"image":"ghcr.io/sussdorff/cli-proxy-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"cpa-manager-plus":{"image":"ghcr.io/sussdorff/cpa-manager-plus@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}

@@ -1,0 +1,5 @@
+services:
+  cli-proxy-api:
+    image: ${CLI_PROXY_IMAGE:?CLI_PROXY_IMAGE must be a digest-pinned sussdorff GHCR reference}
+  cpa-manager-plus:
+    image: ${CPAMP_IMAGE:?CPAMP_IMAGE must be a digest-pinned sussdorff GHCR reference}

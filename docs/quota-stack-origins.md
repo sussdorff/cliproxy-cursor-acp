@@ -59,6 +59,58 @@ Upstream contribution, if it happens later, is a separate PR into
 `router-for-me/CLIProxyAPI` and `seakee/CPA-Manager-Plus`. Until those land,
 production quota display stays on the two `sussdorff` remotes.
 
+## Production image contract
+
+Every push to `main` in the two forks publishes one multi-architecture manifest
+for `linux/amd64` and `linux/arm64`:
+
+- `ghcr.io/sussdorff/cli-proxy-api:<full-commit-sha>` and `:main`
+- `ghcr.io/sussdorff/cpa-manager-plus:<full-commit-sha>` and `:main`
+
+The `main` tag is only a discovery convenience. Production configuration must
+use the manifest digest returned by GHCR, for example
+`ghcr.io/sussdorff/cpa-manager-plus@sha256:<64-hex-digest>`. A digest pins the
+bytes; the OCI labels independently bind those bytes to the exact fork source
+and full revision. Both checks are required.
+
+Copy `deploy/production-images.override.yml` beside the production Compose file.
+This tracked override is the deployment artifact that prevents a later
+`docker compose up` from silently selecting a local or mutable image. Validate
+the rendered configuration and remote image metadata before applying it:
+
+```sh
+export CLI_PROXY_IMAGE='ghcr.io/sussdorff/cli-proxy-api@sha256:<digest>'
+export CLI_PROXY_REVISION='<full-CLIProxyAPI-commit>'
+export CPAMP_IMAGE='ghcr.io/sussdorff/cpa-manager-plus@sha256:<digest>'
+export CPAMP_REVISION='<full-CPA-Manager-Plus-commit>'
+./scripts/verify-production-images.sh pre-deploy \
+  --compose-file /opt/cli-proxy-api/docker-compose.yml \
+  --compose-file /opt/cli-proxy-api/production-images.override.yml
+```
+
+Use those same two files for the deployment, then validate the running
+containers against the same rendered configuration:
+
+```sh
+docker compose \
+  --file /opt/cli-proxy-api/docker-compose.yml \
+  --file /opt/cli-proxy-api/production-images.override.yml up -d
+./scripts/verify-production-images.sh post-deploy \
+  --compose-file /opt/cli-proxy-api/docker-compose.yml \
+  --compose-file /opt/cli-proxy-api/production-images.override.yml
+```
+
+Both modes require `jq` and inspect `docker compose config --format json`,
+asserting the exact image assigned to each named service; the pre-deploy mode pulls
+the digest-pinned images and verifies their OCI provenance without requiring
+running containers. The post-deploy mode additionally verifies the actual
+container references and image IDs. The verifier fails closed for mutable tags,
+any namespace other than `sussdorff`, wrong or incomplete source/revision
+labels, rendered Compose drift, or a running image whose repository digest
+differs from the configured digest. The default container names are
+`cli-proxy-api` and `cpa-manager-plus`; set `CLI_PROXY_CONTAINER` or
+`CPAMP_CONTAINER` when the deployment uses different names.
+
 ## How to rebuild if the server will not start
 
 Identify which process is down, then rebuild only that piece from the table
@@ -84,10 +136,11 @@ failure: login works, Quota stays empty or stale.
 
 ### Host patch
 
-1. Clone `https://github.com/sussdorff/CLIProxyAPI` and checkout `main`.
-2. Build and run that binary (or `go run ./cmd/server`) with the same
-   `config.yaml`, auth directory, plugin directory, and management key the
-   host already uses.
+1. Select the approved full commit on `sussdorff/CLIProxyAPI` `main` and obtain
+   its GHCR manifest digest.
+2. Configure the digest-pinned `ghcr.io/sussdorff/cli-proxy-api` reference with
+   the same `config.yaml`, auth directory, plugin directory, and management key
+   the host already uses.
 3. Confirm the management API, not the chat API:
 
 ```sh
@@ -104,19 +157,14 @@ host-published CPA also needs `remote-management.allow-remote: true`.
 
 ### Image fork
 
-1. Clone `https://github.com/sussdorff/CPA-Manager-Plus` and checkout `main`.
-2. From that tree, with `CPAMP_IMAGE` unset:
-
-```sh
-docker compose -f docker-compose.manager.yml up --build -d
-```
-
+1. Select the approved full commit on `sussdorff/CPA-Manager-Plus` `main` and
+   obtain its GHCR manifest digest.
+2. Configure the digest-pinned `ghcr.io/sussdorff/cpa-manager-plus` reference.
 3. Open the Manager Server UI and connect it to the **host-patch** CPA URL
    plus the CPA management key (not the CPAMP admin key).
 
-Do not pass `--build` together with a digest-pinned `CPAMP_IMAGE`. Confirm
-the image labels point at `github.com/sussdorff/CPA-Manager-Plus`, not
-`seakee`.
+Do not pass `--build` with the production compose invocation. Run the provenance
+verifier instead of judging an image by a local tag.
 
 A stock seakee image against a patched host still shows no plugin windows.
 
