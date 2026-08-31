@@ -430,6 +430,17 @@ Install `build/cliproxy-cursor-acp.so` into
 `<plugins.dir>/<goos>/<goarch>/cliproxy-cursor-acp.so` and restart or reload
 CLIProxyAPI.
 
+## Claude Code, Codex, and Grok clients
+
+To point those CLIs at a CLIProxyAPI origin on a development host, use the
+tracked templates and deploy script in [clients/](clients/README.md). Cursor
+Agent is not redirected.
+
+```sh
+./clients/deploy.sh --key-file /path/to/mode-0600-key --client-name yakushido
+./clients/tests/test-deploy.sh
+```
+
 ## References
 
 - CLIProxyAPI: <https://github.com/router-for-me/CLIProxyAPI>

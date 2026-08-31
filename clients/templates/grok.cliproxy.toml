@@ -1,0 +1,21 @@
+[endpoints]
+models_base_url = "GATEWAY_URL/v1"
+
+[models]
+default = "grok-4.6"
+default_reasoning_effort = "medium"
+
+# Keys must stay quoted: TOML reads [model.grok-4.6] as model.grok-4 -> 6.
+[model."grok-4.6"]
+model = "grok-4.6"
+base_url = "GATEWAY_URL/v1"
+api_backend = "chat_completions"
+env_key = "CLIPROXY_API_KEY"
+context_window = 500000
+
+[model."grok-4.5"]
+model = "grok-4.5"
+base_url = "GATEWAY_URL/v1"
+api_backend = "chat_completions"
+env_key = "CLIPROXY_API_KEY"
+context_window = 500000

@@ -1,4 +1,4 @@
-.PHONY: test test-race vet build build-linux release-archive clean
+.PHONY: test test-race vet test-clients build build-linux release-archive clean
 
 VERSION ?= $(shell awk -F'"' '/"version"/{print $$4; exit}' plugin-store/registry.json)
 GO_VERSION ?= $(shell awk '/^go /{print $$2; exit}' go.mod)
@@ -15,6 +15,9 @@ test-race:
 
 vet:
 	go vet ./...
+
+test-clients:
+	./clients/tests/test-deploy.sh
 
 build:
 	mkdir -p build

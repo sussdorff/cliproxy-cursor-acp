@@ -1,0 +1,6 @@
+{
+  "apiKeyHelper": "API_KEY_HELPER",
+  "env": {
+    "ANTHROPIC_BASE_URL": "GATEWAY_URL"
+  }
+}
