@@ -11,7 +11,7 @@ there.
 
 | Client | Destination | How it authenticates |
 | --- | --- | --- |
-| Claude Code | `~/.claude/settings.local.json` plus `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` | `apiKeyHelper` prints the local key |
+| Claude Code | `~/.claude/settings.local.json` plus `ANTHROPIC_BASE_URL` | `apiKeyHelper` prints the local key. Do not also export `ANTHROPIC_AUTH_TOKEN`. |
 | Codex | `~/.codex/config.toml` `model_providers.cliproxy` | bearer token injected from the key file at deploy time |
 | Grok | `~/.grok/config.toml` endpoints and `grok-4.6` / `grok-4.5` | `env_key = "CLIPROXY_API_KEY"` |
 
