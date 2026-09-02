@@ -6,8 +6,5 @@ if test -r "${HOME}/.config/cliproxy/KEY_FILE"; then
   CLIPROXY_API_KEY="$(tr -d '\n' < "${HOME}/.config/cliproxy/KEY_FILE")"
   export CLIPROXY_API_KEY
   export ANTHROPIC_BASE_URL="GATEWAY_URL"
-  # Claude Code rejects pairing ANTHROPIC_AUTH_TOKEN with apiKeyHelper.
-  # The helper in settings.local.json is the Claude credential; this token
-  # is only for Codex/Grok via CLIPROXY_API_KEY.
-  unset ANTHROPIC_AUTH_TOKEN
+  export ANTHROPIC_AUTH_TOKEN="${CLIPROXY_API_KEY}"
 fi

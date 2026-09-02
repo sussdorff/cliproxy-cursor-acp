@@ -126,13 +126,11 @@ assert_contains "$HOME_DIR/.zshenv" 'cliproxy/env.sh' "zshenv hook"
 
 CLIPROXY_API_KEY=""
 ANTHROPIC_BASE_URL=""
-ANTHROPIC_AUTH_TOKEN="stale-token-must-be-cleared"
 HOME="$HOME_DIR"
 # shellcheck disable=SC1091
 . "$HOME_DIR/.config/cliproxy/env.sh"
 test "${ANTHROPIC_BASE_URL:-}" = 'http://192.0.2.10:8317' || fail "env.sh did not export ANTHROPIC_BASE_URL"
 test "${#CLIPROXY_API_KEY}" -eq 64 || fail "env.sh did not load the client key"
-test -z "${ANTHROPIC_AUTH_TOKEN:-}" || fail "env.sh must unset ANTHROPIC_AUTH_TOKEN so Claude uses apiKeyHelper"
 
 if ! "$DEPLOY" --home "$HOME_DIR" --key-file "$KEY_FILE" --client-name testhost \
   --gateway-url 'http://192.0.2.10:8317' >/dev/null; then
