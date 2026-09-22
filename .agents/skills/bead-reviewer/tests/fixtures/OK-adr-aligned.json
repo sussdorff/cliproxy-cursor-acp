@@ -1,0 +1,11 @@
+{
+  "id": "test-OK-adr-aligned",
+  "title": "Citation auditor supports BVerfG case-number pattern",
+  "description": "Add a pattern module for German Federal Constitutional Court (BVerfG) case numbers to the citation auditor. The module follows the CitationPattern interface from ADR-0002 Decision 7 and ships in the installed `ccore audit-citations` Python package, consistent with ADR-0002 Decision 1 (runtime) and Decision 2 (thinned marketplace skill plus ccore).\n\nThe pattern registers in the ccore pattern registry and exposes the standard parse + candidateUrls methods. URL candidates target `bundesverfassungsgericht.de` per Decision 5. No new dependencies, no second runtime, no new auth surface.\n\n## MoC\n\n| # | AC | MoC | Evidence |\n|---|---|---|---|\n| 1 | BVerfG pattern parses real case numbers | unit | pytest under tests/test_audit_citations.py |\n| 2 | Pattern registered in ccore | review | grep finds the registration |\n| 3 | URL candidates point at bundesverfassungsgericht.de | unit | assertion on candidate URLs |",
+  "acceptance_criteria": "- ccore audit-citations detects BVerfG case numbers (e.g. 1 BvR 123/45)\n- The pattern is registered in the ccore registry\n- url-candidates returns at least one URL on bundesverfassungsgericht.de for a parsed citation",
+  "type": "feature",
+  "metadata": {
+    "intent": "Extend the citation auditor with a new jurisdiction (BVerfG) following ADR-0002. Scope IN: new pattern module, registry entry. Scope OUT: snippet-guard changes, new fetchers, new auth flows.",
+    "contracts": "Implements the CitationPattern interface from ADR-0002 Decision 7. Runtime: installed ccore audit-citations per ADR-0002 Decision 1."
+  }
+}

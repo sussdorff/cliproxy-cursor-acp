@@ -1,0 +1,10 @@
+{
+  "id": "test-ADR-VIOLATION",
+  "title": "Citation auditor detect stage implementation",
+  "description": "Implement the detect stage of the citation auditor. The implementation will revive Bun + TypeScript skill scripts under `skills/audit-citations/scripts/cli.ts`, with a bun.lock and package.json. Detect will walk target files and emit JSON. This approach is preferred because the original clc-dvqh skill shipped that way.",
+  "acceptance_criteria": "bun ./cli.ts detect accepts file paths. Extracts BFH, BMF, EuGH, and GDPR citation patterns. Emits a JSON array of detected citations to stdout. Exit code 0 on success, 1 on error.",
+  "type": "feature",
+  "metadata": {
+    "intent": "Deliver the first stage of the citation auditor pipeline: pattern-based detection of legal citations in source files."
+  }
+}
