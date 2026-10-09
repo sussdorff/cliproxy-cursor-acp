@@ -1,0 +1,16 @@
+{
+  "modules": [
+    {"name": "records", "dir": "src/records", "entry": "src/records/index.ts"}
+  ],
+  "ports": [
+    {
+      "name": "records",
+      "port": "src/ports/records/port.ts",
+      "contract": "src/ports/records/contract.ts",
+      "adapters": [
+        {"name": "memory", "path": "src/records/memory.ts", "in_memory": true},
+        {"name": "sqlite", "path": "src/records/sqlite"}
+      ]
+    }
+  ]
+}
